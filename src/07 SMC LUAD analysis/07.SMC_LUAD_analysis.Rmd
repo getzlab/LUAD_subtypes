@@ -1,0 +1,507 @@
+---
+title: "Roh, Geffen, Cha et al. 07 SMC LUAD analysis"
+output: html_notebook
+---
+
+#### Projection to LUAD cohorts
+
+```{r}
+
+#############################$
+# Load any LUAD expression data (TPM best if available)
+#############################$
+
+library(sm)
+library(vioplot)
+library(ggplot2)
+library(cowplot)
+library(RColorBrewer)
+library(pals)
+library(data.table)
+library(dplyr)
+library(survival)
+library(survminer)
+library(dplyr)
+library(pROC)
+library(NMF)
+library(circlize)
+library(binom)
+library(sva)
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+#clinic informations
+clin.info<-read.delim("Table S22", sep="\t", header=TRUE, stringsAsFactors = FALSE)
+clin.info$PFS<-clin.info$PFS
+clin.info$PFS_status<-as.integer(clin.info$PD_Event.1_Censoring.0_DeathNoPD.2 == 1 )
+rownames(clin.info)<-clin.info$WTS_ID
+
+
+COHORT.LUAD <- read.table("./SMC_LUAD_expr_mat.txt", sep="\t", header=TRUE, stringsAsFactors=FALSE)
+
+
+##remove batch effect 
+
+batch = clin.info$Kit
+COHORT.LUAD<-COHORT.LUAD[rowSums(COHORT.LUAD) != 0, ]
+combat_res = ComBat(dat=as.matrix(COHORT.LUAD), batch=batch)
+
+
+
+######### projection to COHORT.LUAD 
+# Load TCGA LUAD expression data
+TUMOR.GEXP.log2.mat <- readRDS(file = "TUMOR.GEXP.log2.mat.rds")
+
+#Create output folder in the working directory for results 
+
+COHORT_OUTPUT <- "./input/"
+
+threshold.NA <- 0.1
+cut.bottom <- 0.1 ## filter out bottom 10% genes in terms of mean expression
+cut.sd <- 0.75 ## include genes with top 25% in terms of SD
+cut.gene <- 100 ### number of markers in each subtype is restricted by cut.gene
+cut.W <- 0.50 ### only consider genes with the normalized association to clusters >= 0.50
+cut.fold <- rep(0.50,10) ### select markers with mean difference of log2(fold changes) >= 0.50
+cut.NA <- 0.1 ### remove genes with NA values across samples > 0.1 
+
+tumor.type <- "LUAD"
+
+source("./get.marker_for_fold.ver2.WR.TMP.R")
+marker0 <- sapply(marker0,function(x) strsplit(x,"\\|")[[1]][1])
+marker0.original <- marker0
+
+cohort <- "COHORT-LUAD-Tumor"
+#expr <- COHORT.LUAD
+
+
+expr <- combat_res
+
+index.NA <- rowSums(is.na(expr))<= round(cut.NA*ncol(expr))
+expr <- expr[index.NA,]
+expr.fold <- t(apply(expr,1,function(x) x-median(x,na.rm=T)))
+expr.fold[is.na(expr.fold)] <- 0
+expr.fold.up <- apply(expr.fold,2,function(x) ifelse(x>0,x,0))
+rownames(W1) <- sapply(rownames(W1),function(x) strsplit(x,"[|]")[[1]][1])
+for (i in 1:1) {
+  gene.expr <- sapply(rownames(expr.fold),function(x) strsplit(x,"_")[[1]][2])
+  
+  
+  
+  gene.expr <- rownames(expr.fold)
+  marker0 <- rownames(expr.fold)[gene.expr%in%marker0.original] 
+  # gene.marker0 <- sapply(marker0,function(x) strsplit(x,"_")[[1]][2]) 
+  
+  
+  gene.marker0 <- marker0
+  W1.new <- W1[match(gene.marker0,rownames(W1),nomatch=0),]
+  rownames(W1.new) <- marker0
+  expr.fold.marker <- expr.fold[match(marker0,rownames(expr.fold),nomatch=0),]
+  x <- get.SSEC.fold.short(expr,expr.fold,expr.fold.up,cohort,marker0,W1.new)
+  g.Bayes.new <- x[[1]]
+  H.Bayes.new <- x[[2]]
+  colnames(H.Bayes.new) <- names(g.Bayes.new)
+  save(H.Bayes.new,file=paste(COHORT_OUTPUT,paste(cohort,"H.Bayes.RData",sep="."),sep=""))
+}
+
+
+
+H.Bayes.new_norm <- t(H.Bayes.new)
+H.Bayes.new_norm <- H.Bayes.new_norm/rowSums(H.Bayes.new_norm)
+
+
+```
+
+#### Survival analysis
+
+```{r}
+
+clin.info<-read.delim("Table S22", sep="\t", header=TRUE, stringsAsFactors = FALSE)
+clin.info$PFS<-clin.info$PFS
+
+
+clin.info$PFS_status<-as.integer(clin.info$PD_Event.1_Censoring.0_DeathNoPD.2 == 1 )
+rownames(clin.info)<-clin.info$WTS_ID
+
+
+
+my.res<-clin.info[clin.info$subtype != "Unassigned", ]
+table(my.res$subtype)
+
+
+my.res$PFS<-as.numeric(my.res$PFS)
+my.res$PFS_status<-as.integer(my.res$PD_Event.1_Censoring.0_DeathNoPD.2 == 1)
+Y<-my.res[, c("PFS", "PFS_status")]
+Altered<- as.integer(my.res$subtype == 3)
+
+data.surv<-cbind(Y, Altered)
+data.surv$PFS <-as.numeric(data.surv$PFS)/30.5
+
+surv.fit <- survfit(Surv(PFS,PFS_status) ~ Altered, data=data.surv)
+surv<-ggsurvplot(surv.fit, main="TMB",legend.title="", legend="bottom", risk.table=TRUE, palette = c("gray",kelly()[4]),
+                 legend.labs=c("Others", "S3"), xlab = "Months", ylab = "Progression free survival")
+
+
+
+pdf("./figures/KMPlot_subtype3.pdf")
+print(surv)
+dev.off()
+
+cox.reg=suppressWarnings(summary(coxph(Surv(PFS, PFS_status) ~ Altered, data=data.surv)))
+haz.rat=cox.reg$coef
+haz.rat.ci.lo=cox.reg$conf.int
+
+
+
+###subtype 2,3,4,5
+
+
+my.res<-clin.info[clin.info$subtype != "Unassigned", ]
+table(my.res$subtype)
+
+
+my.res$PFS<-as.numeric(my.res$PFS)
+my.res$PFS_status<-as.integer(my.res$PD_Event.1_Censoring.0_DeathNoPD.2 == 1)
+Y<-my.res[, c("PFS", "PFS_status")]
+Altered<- as.integer(my.res$subtype == 3)
+
+data.surv<-cbind(Y, Altered)
+data.surv$PFS <-as.numeric(data.surv$PFS)/30.5
+
+
+Altered<- my.res$subtype
+data.surv<-cbind(Y, Altered)
+data.surv$PFS <-as.numeric(data.surv$PFS)
+
+data.surv <- data.surv[Altered != 1, ]
+data.surv$PFS <-as.numeric(data.surv$PFS)/30.5
+
+surv.fit <- survfit(Surv(PFS,PFS_status) ~ Altered, data=data.surv)
+surv<-ggsurvplot(surv.fit, main="TMB",legend.title="", legend="bottom", risk.table=TRUE, palette = c( kelly()[3],kelly()[4],kelly()[5],kelly()[6]),
+                 legend.labs=c("S2",  "S3", "S4", "S5"), xlab = "Months", ylab = "Progression free survival", pval = TRUE)
+
+pdf("./figures/KMPlot_All.pdf")
+print(surv)
+dev.off()
+
+cox.reg=suppressWarnings(summary(coxph(Surv(PFS, PFS_status) ~ Altered, data=data.surv)))
+haz.rat=cox.reg$coef
+haz.rat.ci.lo=cox.reg$conf.int
+
+
+##### multivariate analysis - cox proportional hazards models
+
+
+my.res <- clin.info[clin.info$subtype != "Unassigned", ]
+input.hr<-my.res[my.res$category1 != "non", ]
+
+input.hr$Sex <- "M"
+input.hr$Sex[input.hr$Sex.........M..1.........F..2 == 2] <- "F"
+
+input.hr$Age <- as.numeric(input.hr$Age_IO)
+
+input.hr$Smoking <- "Ever"
+input.hr$Smoking[input.hr$Smoking.Never..0.Ex..1.Current..2 == 0] <- "Never"
+
+input.hr$subtypes<-"Others"
+input.hr$subtypes[input.hr$subtype == 3] <-"S3"
+
+
+
+input.hr$Age <- as.numeric(input.hr$Age_IO)
+input.hr$Sex<-as.factor(input.hr$Sex)
+input.hr$Smoking<-as.factor(input.hr$Smoking)
+input.hr$PDL1_IHC<-as.factor(input.hr$category2)
+
+
+
+Total_Multi_PFS_panel <- coxph(Surv(PFS,PFS_status) ~ Age+Sex+Smoking+PDL1_IHC+subtypes, data=input.hr)
+cox.reg=suppressWarnings(summary(Total_Multi_PFS_panel))
+haz.rat=cox.reg$coef
+haz.rat.ci.lo=cox.reg$conf.int
+
+
+pdf("./figures/Multi_cox_Age_sex_smoking.pdf", width = 10)
+ggforest(Total_Multi_PFS_panel, main = "Multi-HR : Subtype", fontsize = 1.0)
+dev.off()
+
+```
+
+#### Pathway analysis
+
+```{r}
+
+library(GSVA)
+
+#Figure 4 clustering
+
+set.genes <- read.table("./gene_set_order.txt", sep = "\t", header=FALSE, stringsAsFactors = FALSE)
+pathways<-read.delim2( "./h.all.v6.1.symbols.gmt",header=F,sep="\t")
+rownames(pathways) <- pathways[,1]
+pathways<-pathways[,-c(1,2)];pathway<-t(pathways)
+
+
+ss <- clin.info[, "subtype"]
+names(ss) <- clin.info$WTS_ID
+ss <- ss[order(ss)]
+
+
+
+aa <- t(H.Bayes.new_norm[names(ss),])
+
+
+
+
+marker_genes <- read.table("./marker_genes.txt", sep = "\t", header = TRUE, stringsAsFactors = FALSE)
+
+pathway_lists_filters<-list(); 
+for(n in 1:length(colnames(pathway)))
+{
+  gg <- pathway[,n]
+  #gg <- gg[ ! gg %in% marker_genes]
+  pathway_lists_filters[[n]]<-gg }
+names(pathway_lists_filters)<-colnames(pathway)
+
+
+cptac_luad_gsva_filtered <- gsva(combat_res,  pathway_lists_filters, method="gsva", mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+cptac_luad_gsva_filtered.scaled <- t(scale(t(cptac_luad_gsva_filtered))) 
+
+pdf("./figures/GSVA_filtered_All.pdf")
+
+cptac_luad_gsva_filtered.scaled <- cptac_luad_gsva_filtered.scaled[set.genes[,1] , names(ss)]
+aheatmap(aa, Colv = NA, Rowv= NA)
+aheatmap(cptac_luad_gsva_filtered.scaled, Colv = NA, Rowv= NA, scale = "row")
+
+dev.off()
+
+```
+
+#### ORR barplot
+
+```{r}
+
+aa <- table(clin.info$Response, clin.info$subtype)
+#aa <- table(Altered, my.res$category1)
+
+
+bar_input <- cbind(aa["PR", ], colSums(aa[c("PD", "SD"), ]))
+colnames(bar_input) <- c("Resp", "non")
+bar_input <- bar_input / rowSums(bar_input)
+bar_input <- bar_input[-1, ]
+
+
+#######
+
+df1 <- cbind(bar_input[,1], "Resp", rownames(bar_input))
+df2 <- cbind(bar_input[,2] ,"Non", rownames(bar_input))
+
+colnames(df1) <- c("Prop", "Resp", "subtypes")
+colnames(df2) <- c("Prop", "Resp", "subtypes")
+
+df <- data.frame(rbind(df1, df2))
+df$Prop <- as.numeric(df$Prop)
+#df$Prop <- df$Pct / 100
+
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(164, 5), rep(164,5))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+
+df$Pct <- df$Prop*100
+
+
+pdf("./figures/ORR_barplot_error_bar.pdf")
+
+ggplot(df, aes(fill= Resp, y = Pct, x = as.factor(df$subtypes)))+
+  geom_col(position = "dodge") +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), 
+                position = position_dodge(0.9), width = .3)+
+  scale_x_discrete(name = "", label = c( "S2" ,"S3" ,
+                                        "S4", "S5", "Unassigned"))+
+  ggsci::scale_fill_jco(name = "Site")+
+  ggpubr::theme_pubclean()+
+  theme(axis.title.x = element_blank(), legend.position = "right")+
+  coord_cartesian(expand = FALSE)+
+  scale_y_continuous(breaks = seq(20,110,20), name = "Percentage")
+dev.off()
+
+##
+
+```
+
+#### PD-L1 expression
+
+```{r}
+
+aa <- table(my.res$Response, Altered)
+bar_inptu <- cbind(aa["PR", ], colSums(aa[c("PD", "SD"), ]))
+colnames(bar_inptu) <- c("Resp", "non")
+
+
+
+wilcox.test(pdcd_resp$X22C3[pdcd_resp$subtype == 3], 
+            pdcd_resp$X22C3[pdcd_resp$subtype != 3])
+
+
+pdcd_resp <- my.res[my.res$category1 != "non" & ! is.na(my.res$category1) & ! is.na(my.res$subtype), ]
+
+aa <- table(pdcd_resp$Response, pdcd_resp$subtype)
+bar_inptu <- cbind(aa["PR", ], colSums(aa[c("PD", "SD"), ]))
+colnames(bar_inptu) <- c("Resp", "non")
+#bar_inptu <- bar_inptu / rowSums(bar_inptu)
+
+
+
+pdcd_resp_aa1 <- pdcd_resp[pdcd_resp$Response == "PR", ]
+aa1 <- table(pdcd_resp_aa1$category1, pdcd_resp_aa1$subtype)
+aa1 <- t(aa1) / rowSums(bar_inptu)
+rownames(aa1) <- paste(rownames(aa1), "_resp", sep = "")
+
+
+
+pdcd_resp_aa2 <- pdcd_resp[pdcd_resp$Response != "PR", ]
+aa2 <- table(pdcd_resp_aa2$category1, pdcd_resp_aa2$subtype)
+aa2 <- t(aa2) / rowSums(bar_inptu)[-1]
+rownames(aa2) <- paste(rownames(aa2), "_non", sep = "")
+
+
+input_bar <- rbind(aa1, aa2)
+
+input_bar <- input_bar[order(rownames(input_bar)), ]
+
+
+
+
+df <- clin.info[rownames(data.surv), c("subtype", "X22C3")]
+df[is.na(df[,1]), 1] <- "Unssigned"
+
+df <- df[! is.na(df$X22C3), ]
+
+pdf("./figures/boxplot_22c3.pdf")
+
+ggplot(df, aes(x=subtype, y=X22C3, fill = subtype)) +
+  geom_boxplot(data = df, inherit.aes = F, aes(x=subtype, y=X22C3, fill = subtype), 
+               alpha = 0.9)+geom_point(position=position_jitterdodge(),  size =1, alpha = 0.7)+  
+  scale_fill_manual(values = c(kelly()[2], kelly()[3], kelly()[4], kelly()[5], kelly()[6], "gray"))+
+  #  geom_jitter(data = df, inherit.aes = F, aes(x=celltype, y=prop, fill = resp),
+  #              width = 0.2, size =1, alpha = 0.7) +
+  #  scale_y_continuous(limits = c(100, 3000000), expand = expansion(mult = c(0.01, 0.03)),
+  #                     trans = 'log10') +
+  theme_minimal() +
+  #scale_x_discrete(limits = rev) +
+  theme(
+    plot.title = element_text(color = 'black', size = 25, hjust = 0),
+    plot.subtitle = element_text(color = 'black', size = 23, hjust =1),
+    axis.title.x  = element_blank(),
+    axis.title.y = element_text(color = "black", size = 22, hjust = 0.5),
+    # axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 18),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    #  plot.margin = margin(75, 225, 75, 225),
+    axis.line = element_line(color = 'black'),
+    axis.ticks = element_line(color = "black"),
+    legend.position = "none"
+  )# +
+# labs(
+#    y="T cell proportion"
+#  ) +
+#  scale_fill_manual( values = c("#3182bd", "#756bb1")) 
+dev.off()
+
+
+
+####boxplot
+
+
+pdcd_resp <- clin.info[! is.na(clin.info$X22C3), ]
+
+pdcd_resp$resp <- "Resp"
+pdcd_resp$resp[pdcd_resp$Response != "PR"] <- "non"
+
+df <- pdcd_resp[,c("subtype", "resp", "X22C3")]
+df[,3] <- as.numeric(df[,3])
+df[,1] <- as.factor(df[,1])
+
+
+
+pdf("./figures/boxplot_22c3.pdf")
+
+ggplot(df, aes(x=subtype, y=X22C3, fill = subtype)) +
+  geom_boxplot(data = df, inherit.aes = F, aes(x=subtype, y=X22C3, fill = subtype), 
+               alpha = 0.9)+geom_point(position=position_jitterdodge(),  size =1, alpha = 0.7)+  
+  scale_fill_manual(values = c(kelly()[2], kelly()[3], kelly()[4], kelly()[5], kelly()[6], "gray"))+
+  #  geom_jitter(data = df, inherit.aes = F, aes(x=celltype, y=prop, fill = resp),
+  #              width = 0.2, size =1, alpha = 0.7) +
+  #  scale_y_continuous(limits = c(100, 3000000), expand = expansion(mult = c(0.01, 0.03)),
+  #                     trans = 'log10') +
+  theme_minimal() +
+  #scale_x_discrete(limits = rev) +
+  theme(
+    plot.title = element_text(color = 'black', size = 25, hjust = 0),
+    plot.subtitle = element_text(color = 'black', size = 23, hjust =1),
+    axis.title.x  = element_blank(),
+    axis.title.y = element_text(color = "black", size = 22, hjust = 0.5),
+    # axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 18),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    #  plot.margin = margin(75, 225, 75, 225),
+    axis.line = element_line(color = 'black'),
+    axis.ticks = element_line(color = "black"),
+    legend.position = "none"
+  )# +
+# labs(
+#    y="T cell proportion"
+#  ) +
+#  scale_fill_manual( values = c("#3182bd", "#756bb1")) 
+dev.off()
+
+
+####
+aa <- pdcd_resp[, c("resp", "category2", "subtype")]
+
+resp_aa <- aa[aa$resp == "Resp", ]
+non_aa <- aa[aa$resp == "non", ]
+
+
+resp_table <- data.frame(t(table(resp_aa[, c("category2", "subtype")])))
+resp_table <- resp_table[-c(1,7), ]
+non_table <- data.frame(t(table(non_aa[, c("category2", "subtype")])))
+
+
+total <- cbind(resp_table[resp_table$category2 == "positive", 3], 
+               resp_table[resp_table$category2 == "negative", 3], 
+               non_table[non_table$category2 == "positive", 3], 
+               non_table[non_table$category2 == "negative", 3])
+
+rownames(total) <- c( "S2", "S3", "S4" , "S5", "Unassigned")
+colnames(total) <- c("Resp_pos", "Resp_neg", "Non_pos", "Neg_neg")
+
+
+total_bar <- total/rowSums(total)
+
+
+dat <- rbind(total_bar[,c(1,2)], total_bar[,c(3,4)])
+
+pdf("./figures/PDL1_barplot.pdf")
+dat <- dat[order(rownames(dat)), ]
+barplot(t(dat), col = c("salmon", "gray"), ylab = "Proportion")
+dev.off()
+
+```
+
