@@ -1,0 +1,1529 @@
+---
+title: "Roh, Geffen, Cha et al. 04 CPTAC LUAD analysis II"
+output: html_notebook
+---
+
+###### Import packages 
+
+```{r}
+library(ggplot2)
+library(reshape2)
+library(ggrepel)
+library(ggpubr)
+library(cowplot)
+library(dplyr)
+library(viridis)
+library(readxl)
+library(tidyverse)
+library(rstatix)
+
+###Standerized color code for subtypes
+#Subtype 1: "#222222"
+#Subtype 2: "#F3C300"
+#Subtype 3: "#875692"
+#Subtype 4: "#F38400"
+#Subtype 5: "#A1CAF1"
+
+```
+
+###### CPTAC data upload 
+
+```{r}
+
+# We use supplementary tables S1-S3 from Gillette et al. 2020
+
+################################################
+####### expression data = Two-component normalized Log2 transformed 
+################################################
+
+#Upload the relevant data files from the CPTAC LUAD cohort - Proteomic and phosphoproteomic data 
+#Proteomic data (Table S3A, Gillette et al. 2020)
+
+luad_prot <- read.csv(file="Table S3A",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+
+
+#Phosphoproteomic data (Table S3B, Gillette et al. 2020)
+luad_phos <- read.csv(file="Table S3A",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+
+#Upload Table S12 -Sample_subtype_membership_for_CPTAC_LUAD
+luad_cluster <- read_excel("S12_sample-subtype_membership.xlsx" )
+
+
+#Data prep for downstream analysis - split clinical data and expression tables 
+#Proteomic data
+##add id to row.names
+row.names(luad_prot)<- luad_prot$id
+
+#reduce all clinical data
+luad_prot_clin_cut <-luad_prot[79:10777,17:227]
+luad_prot_clin_cut <- as.data.frame(sapply(luad_prot_clin_cut, as.numeric))
+
+#add back relevant information
+luad_prot_clin_cut$GeneSymbol <- luad_prot$GeneSymbol[79:10777]
+luad_prot_clin_cut$accession_number <- luad_prot$accession_number[79:10777]
+
+#Arrange the data to only have the relevant tumor only 
+#Phosphorylatyion data
+##add id to row.names
+row.names(luad_phos)<- luad_phos$id
+
+#reduce all clinical data
+luad_phos_clin_cut <-luad_phos[79:41266,23:233]
+luad_phos_clin_cut <- as.data.frame(sapply(luad_phos_clin_cut, as.numeric))
+#add back relevant information
+luad_phos_clin_cut$GeneSymbol <- luad_phos$GeneSymbol[79:41266]
+luad_phos_clin_cut$accession_number <- luad_phos$accession_number[79:41266]
+head(luad_phos_clin_cut)
+#reduce only to tumor samples from the luad_clustering results
+luad_tumor <- intersect(colnames(luad_phos_clin_cut),luad_cluster$submitter_id_modified)
+luad_phos_tumor_only <- luad_phos_clin_cut[,luad_tumor]
+#add back relevant information
+luad_phos_tumor_only$GeneSymbol <- luad_phos$GeneSymbol[79:41266]
+luad_phos_tumor_only$accession_number <- luad_phos$accession_number[79:41266]
+luad_phos_tumor_only$variableSites <- luad_phos$variableSites[79:41266]
+
+
+```
+
+#### Copy number alteration related plots (Fig 3C)
+
+```{r}
+
+#CNA analysis for lost and gained sites - and their effect on protein expression
+#Upload Table S12 CNA data - 
+cna_luad <- read.csv(file="Table_S12_CPTAC_LUAD_all_thresholded.by_genes_for_selected_genes.csv", header = T) 
+#reorganize the file and create additional rows with amplification/ deletions annotation
+row.names(cna_luad) <- cna_luad$Gene.Symbol
+cna_luad_temp <- as.data.frame(t(cna_luad[,4:112]))
+rownames(cna_luad_temp) <- gsub("_TP","", rownames(cna_luad_temp))
+cna_luad_temp$MCL1_new <- cna_luad_temp$MCL1
+cna_luad_temp$MCL1_new <- gsub("-1","DEL", cna_luad_temp$MCL1_new)
+cna_luad_temp$MCL1_new <- gsub("1","AMP", cna_luad_temp$MCL1_new)
+cna_luad_temp$MCL1_new <- gsub("2","AMP", cna_luad_temp$MCL1_new)
+cna_luad_temp$MCL1_new <- gsub("0","None", cna_luad_temp$MCL1_new)
+cna_luad_temp$PIK3CA_new <- cna_luad_temp$PIK3CA
+cna_luad_temp$PIK3CA_new <- gsub("-1","DEL", cna_luad_temp$PIK3CA_new)
+cna_luad_temp$PIK3CA_new <- gsub("-2","DEL", cna_luad_temp$PIK3CA_new)
+cna_luad_temp$PIK3CA_new <- gsub("1","AMP", cna_luad_temp$PIK3CA_new)
+cna_luad_temp$PIK3CA_new <- gsub("2","AMP", cna_luad_temp$PIK3CA_new)
+cna_luad_temp$PIK3CA_new <- gsub("0","None", cna_luad_temp$PIK3CA_new)
+cna_luad_temp$FAT1_new <- cna_luad_temp$FAT1
+cna_luad_temp$FAT1_new <- gsub("-1","DEL", cna_luad_temp$FAT1_new)
+cna_luad_temp$FAT1_new <- gsub("-2","DEL", cna_luad_temp$FAT1_new)
+cna_luad_temp$FAT1_new <- gsub("1","AMP", cna_luad_temp$FAT1_new)
+cna_luad_temp$FAT1_new <- gsub("2","AMP", cna_luad_temp$FAT1_new)
+cna_luad_temp$FAT1_new <- gsub("0","None", cna_luad_temp$FAT1_new)
+cna_luad_temp$PDE4D_new <- cna_luad_temp$PDE4D
+cna_luad_temp$PDE4D_new <- gsub("-1","DEL", cna_luad_temp$PDE4D_new)
+cna_luad_temp$PDE4D_new <- gsub("-2","DEL", cna_luad_temp$PDE4D_new)
+cna_luad_temp$PDE4D_new <- gsub("1","AMP", cna_luad_temp$PDE4D_new)
+cna_luad_temp$PDE4D_new <- gsub("2","AMP", cna_luad_temp$PDE4D_new)
+cna_luad_temp$PDE4D_new <- gsub("0","None", cna_luad_temp$PDE4D_new)
+cna_luad_temp$MET_new <- cna_luad_temp$MET
+cna_luad_temp$MET_new <- gsub("-1","DEL", cna_luad_temp$MET_new)
+cna_luad_temp$MET_new <- gsub("-2","DEL", cna_luad_temp$MET_new)
+cna_luad_temp$MET_new <- gsub("1","AMP", cna_luad_temp$MET_new)
+cna_luad_temp$MET_new <- gsub("2","AMP", cna_luad_temp$MET_new)
+cna_luad_temp$MET_new <- gsub("0","None", cna_luad_temp$MET_new)
+cna_luad_temp$JAK2_new <- cna_luad_temp$JAK2
+cna_luad_temp$JAK2_new <- gsub("-1","DEL", cna_luad_temp$JAK2_new)
+cna_luad_temp$JAK2_new <- gsub("-2","DEL", cna_luad_temp$JAK2_new)
+cna_luad_temp$JAK2_new <- gsub("1","AMP", cna_luad_temp$JAK2_new)
+cna_luad_temp$JAK2_new <- gsub("2","AMP", cna_luad_temp$JAK2_new)
+cna_luad_temp$JAK2_new <- gsub("0","None", cna_luad_temp$JAK2_new)
+cna_luad_temp$CD274_new <- cna_luad_temp$CD274
+cna_luad_temp$CD274_new <- gsub("-1","DEL", cna_luad_temp$CD274_new)
+cna_luad_temp$CD274_new <- gsub("-2","DEL", cna_luad_temp$CD274_new)
+cna_luad_temp$CD274_new <- gsub("1","AMP", cna_luad_temp$CD274_new)
+cna_luad_temp$CD274_new <- gsub("2","AMP", cna_luad_temp$CD274_new)
+cna_luad_temp$CD274_new <- gsub("0","None", cna_luad_temp$CD274_new)
+cna_luad_temp$PAK1_new <- cna_luad_temp$PAK1
+cna_luad_temp$PAK1_new <- gsub("-1","DEL", cna_luad_temp$PAK1_new)
+cna_luad_temp$PAK1_new <- gsub("-2","DEL", cna_luad_temp$PAK1_new)
+cna_luad_temp$PAK1_new <- gsub("1","AMP", cna_luad_temp$PAK1_new)
+cna_luad_temp$PAK1_new <- gsub("2","AMP", cna_luad_temp$PAK1_new)
+cna_luad_temp$PAK1_new <- gsub("0","None", cna_luad_temp$PAK1_new)
+cna_luad_temp$KRAS_new <- cna_luad_temp$KRAS
+cna_luad_temp$KRAS_new <- gsub("-1","DEL", cna_luad_temp$KRAS_new)
+cna_luad_temp$KRAS_new <- gsub("-2","DEL", cna_luad_temp$KRAS_new)
+cna_luad_temp$KRAS_new <- gsub("1","AMP", cna_luad_temp$KRAS_new)
+cna_luad_temp$KRAS_new <- gsub("2","AMP", cna_luad_temp$KRAS_new)
+cna_luad_temp$KRAS_new <- gsub("0","None", cna_luad_temp$KRAS_new)
+  
+
+#Significantly gained CNA genes based on TCGA Data
+S3_gain_list <- c("PIK3CA", "MET","CD274", "JAK2", "PAK1", "MAPK","FGFR", "MCL1", "KRAS")
+
+S3_gain<-luad_prot_clin_cut %>% filter(GeneSymbol %in% S3_gain_list)
+rownames(S3_gain) <- S3_gain$GeneSymbol
+
+#update S3 gained gained annotations
+S3_gain_temp <-as.data.frame(t(S3_gain[,1:211]))
+S3_gain_temp$subtype <-  luad_cluster$Subtypes[match(row.names(S3_gain_temp),row.names(luad_cluster))]
+S3_gain_temp$subtype[is.na(S3_gain_temp$subtype)] <- "NAT"
+S3_gain_temp <- S3_gain_temp[which(S3_gain_temp$subtype!="S1"& S3_gain_temp$subtype!= "S2"),]
+S3_gain_temp$MCL1_cna <- cna_luad_temp$MCL1_new[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$PIK3CA_cna <- cna_luad_temp$PIK3CA_new[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$MET_cna <- cna_luad_temp$MET_new[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$MET_cna_original <- cna_luad_temp$MET[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$JAK2_cna <- cna_luad_temp$JAK2_new[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$CD274_cna <- cna_luad_temp$CD274_new[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$CD274_cna_original <- cna_luad_temp$CD274[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$PAK1_cna <- cna_luad_temp$PAK1_new[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$KRAS_cna <- cna_luad_temp$KRAS_new[match(row.names(S3_gain_temp),row.names(cna_luad_temp))]
+S3_gain_temp$MCL1_cna[is.na(S3_gain_temp$MCL1_cna)] <- "NONE"
+S3_gain_temp$PIK3CA_cna[is.na(S3_gain_temp$PIK3CA_cna)] <- "NONE"
+S3_gain_temp$MET_cna[is.na(S3_gain_temp$MET_cna)] <- "NONE"
+S3_gain_temp$JAK2_cna[is.na(S3_gain_temp$JAK2_cna)] <- "NONE"
+S3_gain_temp$CD274_cna[is.na(S3_gain_temp$CD274_cna)] <- "NONE"
+S3_gain_temp$PAK1_cna[is.na(S3_gain_temp$PAK1_cna)] <- "NONE"
+S3_gain_temp$KRAS_cna[is.na(S3_gain_temp$KRAS_cna)] <- "NONE"
+
+#Plot Figure 3C
+#MET_gain
+met_gain_stat <- S3_gain_temp  %>%
+  wilcox_test(MET ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+
+met_gain_stat$p.adj <- sprintf("%.2e", met_gain_stat$p.adj)
+met_gain <- ggplot(S3_gain_temp, aes(x = subtype, y = MET))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=MET_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "MET" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(met_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/met_cna_plot_v2.pdf",width=8, height=7)
+
+#PIK3CA_gain        
+ pik3ca_gain_stat <- S3_gain_temp  %>%
+  wilcox_test(PIK3CA ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+pik3ca_gain_stat$p.adj <- sprintf("%.2e", pik3ca_gain_stat$p.adj)
+pik3ca_gain <- ggplot(S3_gain_temp, aes(x = subtype, y = PIK3CA))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=PIK3CA_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "PIK3CA" ,y="Protein levels")+
+        ylim(-2,2.5)+
+        stat_pvalue_manual(pik3ca_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/PIK3CA_cna_plot_v2.pdf",width=8, height=7)
+
+#JAK2_gain        
+jak2_gain_stat <- S3_gain_temp  %>%
+  wilcox_test(JAK2 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+jak2_gain_stat$p.adj <- sprintf("%.2e", jak2_gain_stat$p.adj)
+
+jak2_gain <- ggplot(S3_gain_temp, aes(x = subtype, y = JAK2))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=JAK2_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "JAK2" ,y="Protein levels")+
+        stat_pvalue_manual(jak2_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/JAK2_cna_plot_v2.pdf",width=8,height=7)  
+
+#PAK1_gain        
+pak1_gain_stat <- S3_gain_temp  %>%
+  wilcox_test(PAK1 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+pak1_gain_stat$p.adj <- sprintf("%.2e", pak1_gain_stat$p.adj)
+
+pak1_gain <- ggplot(S3_gain_temp, aes(x = subtype, y = PAK1))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=PAK1_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "PAK1" ,y="Protein levels")+
+        stat_pvalue_manual(pak1_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/PAK1_cna_plot_v2.pdf",width=8,height=7) 
+
+#MCL1_gain        
+mcl1_gain_stat <- S3_gain_temp  %>%
+  wilcox_test(MCL1 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+mcl1_gain_stat$p.adj <- sprintf("%.2e", mcl1_gain_stat$p.adj)
+
+mcl1_gain <- ggplot(S3_gain_temp, aes(x = subtype, y = MCL1))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=MCL1_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "MCL1" ,y="Protein levels")+
+        stat_pvalue_manual(mcl1_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/CL1_cna_plot_v2.pdf",width=8,height=7)   
+        
+  #KRAS_gain        
+kras_gain_stat <- S3_gain_temp  %>%
+  wilcox_test(KRAS ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+kras_gain_stat$p.adj <- sprintf("%.2e", kras_gain_stat$p.adj)
+
+kras_gain <- ggplot(S3_gain_temp, aes(x = subtype, y = KRAS))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=KRAS_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "KRAS" ,y="Protein levels")+
+        stat_pvalue_manual(kras_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/KRAS_CNA_plot_v2.pdf",width=8,height=7)         
+        
+#CD274_gain        
+cd274_gain_stat <- S3_gain_temp  %>%
+  wilcox_test(CD274 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+cd274_gain_stat$p.adj <- sprintf("%.2e", cd274_gain_stat$p.adj)
+
+cd274_gain <- ggplot(S3_gain_temp, aes(x = subtype, y = CD274))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.5, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=CD274_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "CD274" ,y="Protein levels")+
+        stat_pvalue_manual(cd274_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/CD274_cna_plot_v2.pdf",width=8,height=7) 
+
+#arrange 7 plots together
+genomic_gained_sites_combined_tumor<- ggarrange( met_gain+
+               theme(axis.ticks.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                     plot.margin = margin(r = 1, l = 1)),
+           
+            cd274_gain+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          pak1_gain+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          jak2_gain+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          pik3ca_gain+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          mcl1_gain+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+           
+          kras_gain+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                    axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          common.legend = TRUE, legend = "bottom",
+         ncol=7,nrow = 1,widths =c(4.5,3,3,3,3,3,3))
+
+###Significantly deleted CNA genes based on TCGA Data
+deleted_list<- c("KDM6A", "FAT1","PDE4D")
+
+s3_loss<-luad_prot_clin_cut %>% filter(GeneSymbol %in% deleted_list)
+rownames(s3_loss) <- s3_loss$GeneSymbol
+
+
+#update S3 gained losed annotations
+deleted_temp <-as.data.frame(t(s3_loss[,1:211]))
+deleted_temp$subtype <-  luad_cluster$Subtypes[match(row.names(deleted_temp),row.names(luad_cluster))]
+deleted_temp$subtype[is.na(deleted_temp$subtype)] <- "NAT"
+deleted_temp <- deleted_temp[which(deleted_temp$subtype!="S1"& deleted_temp$subtype!= "S2"),]
+deleted_temp$FAT1_cna <- cna_luad_temp$FAT1_new[match(row.names(deleted_temp),row.names(cna_luad_temp))]
+deleted_temp$PDE4D_cna <- cna_luad_temp$PDE4D_new[match(row.names(deleted_temp),row.names(cna_luad_temp))]
+deleted_temp$FAT1_cna[is.na(deleted_temp$FAT1_cna)] <- "NONE"
+deleted_temp$PDE4D_cna[is.na(deleted_temp$PDE4D_cna)] <- "NONE"
+
+
+#FAT1_del
+fat1_del_stat <- deleted_temp  %>%
+  wilcox_test(FAT1 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+fat1_del <- ggplot(deleted_temp, aes(x = subtype, y = FAT1))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=FAT1_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "FAT1" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(fat1_loss_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/FAT1_cna_plot_v2.pdf",width=8,height=7)
+
+#PDE4D_del
+pde4d_del_stat <- deleted_temp  %>%
+  wilcox_test(PDE4D ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+pde4d_del <- ggplot(deleted_temp, aes(x = subtype, y = PDE4D))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=PDE4D_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#e75480","#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "PDE4D")+
+        stat_pvalue_manual(pde4d_loss_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/DE4D_cna_plot_v2.pdf",width=8,height=7)
+
+
+#the color of AMP -red, DEL-blue and NONE gray
+
+
+
+#Generate Figure 4A+4B - Protein data no Normal adjacent tumor 
+#MET_gain_no NAT
+s3_gain_temp_nat <- S3_gain_temp[which(S3_gain_temp$subtype!="NAT"),]
+met_gain_no_nat_stat <- s3_gain_temp_nat  %>%
+  wilcox_test(MET ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+met_gain_no_nat_stat$p.adj <- sprintf("%.2e", met_gain_no_nat_stat$p.adj)
+met_gain_no_NAT <- ggplot(met_s3_gain_temp_nat, aes(x = subtype, y = MET))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=MET_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "MET" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(met_gain_no_nat_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/met_cna_no_nat_plot_v2.pdf",width=7, height=5.5)
+
+#CD274_gain no NAT
+cd274_gain_no_nat_stat <- s3_gain_temp_nat  %>%
+  wilcox_test(CD274 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+cd274_gain_no_nat_stat$p.adj <- sprintf("%.2e", cd274_gain_no_nat_stat$p.adj)
+
+cd274_gain_no_NAT <- ggplot(s3_gain_temp_nat, aes(x = subtype, y = CD274))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=CD274_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "CD274" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(cd274_gain_no_nat_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)+
+        ggsave(file="/working_directory/CD274_cna_no_nat_plot_v2.pdf",width=7, height=5.5)
+
+
+#Generate Figure 4A+4B - Phosphorylation protein data no Normal adjacent tumor 
+
+#MET Phosphorylation
+luad_phos_met <- luad_phos_tumor_only[luad_phos_tumor_only$GeneSymbol=="MET",]
+rownames(luad_phos_met) <- luad_phos_met$variableSites
+luad_phos_met_temp <- as.data.frame(t(luad_phos_met[,1:110]))
+luad_phos_met_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_phos_met_temp),row.names(luad_cluster))]
+luad_phos_met_temp <- luad_phos_met_temp[which(luad_phos_met_temp$Subtype != "S1" & luad_phos_met_temp$Subtype != "S2"),]
+
+luad_phos_met_temp$`S984s `
+stat_phos1.test <- luad_phos_met_temp  %>%
+  wilcox_test(`S984s ` ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+stat_phos1.test$p.adj <- sprintf("%.2e", stat_phos1.test$p.adj)
+
+met_phos1 <- ggplot(luad_phos_met_temp, aes(x = Subtype, y = `S984s `))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="S984" ,y="Phosphorylation Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(stat_phos1.test, label = "p.adj", hide.ns = TRUE,tip.length = 0.005)
+      
+
+stat_phos2.test <- luad_phos_met_temp  %>%
+  wilcox_test(`T995t ` ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+stat_phos2.test$p.adj <- sprintf("%.2e", stat_phos2.test$p.adj)
+met_phos2 <- ggplot(luad_phos_met_temp, aes(x = Subtype, y = `T995t `))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="T995")+
+        stat_pvalue_manual(stat_phos2.test, label = "p.adj", hide.ns = TRUE,tip.length = 0.005)
+        
+legend <- get_legend(met_phos2)
+
+
+stat_phos3.test <- luad_phos_met_temp  %>%
+  wilcox_test(`T1010t ` ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+stat_phos3.test$p.adj <- sprintf("%.2e", stat_phos3.test$p.adj)
+
+met_phos3 <- ggplot(luad_phos_met_temp, aes(x = Subtype, y = `T1010t `))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="T1010")+
+        stat_pvalue_manual(stat_phos3.test, label = "p.adj", hide.ns = TRUE,tip.length = 0.005)
+      
+
+#arrange 3 plots together
+met_phos_sites_combined<- ggarrange( met_phos1+
+               theme(axis.ticks.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank()),
+                     
+           
+          met_phos2+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank()),
+                 
+          
+           
+          met_phos3+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                    axis.title.x=element_blank()),
+                  
+    
+                common.legend = TRUE, legend = "bottom",
+                ncol=3,nrow = 1, align = "hv")
+
+#PD-L1 Phosphorylation
+#cd274_phos
+luad_phos_cd274 <- luad_phos_tumor_only[luad_phos_tumor_only$GeneSymbol=="CD274",]
+rownames(luad_phos_cd274) <- luad_phos_cd274$variableSites
+luad_phos_cd274_temp <- as.data.frame(t(luad_phos_cd274[,1:110]))
+luad_phos_cd274_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_phos_cd274_temp),row.names(luad_cluster))]
+luad_phos_cd274_temp <- luad_phos_cd274_temp[which(luad_phos_cd274_temp$Subtype != "S1" & luad_phos_cd274_temp$Subtype != "S2"),]
+
+luad_phos_cd274_temp$`T290t `
+#create 3 separate figures and combine
+stat_phos1.test <- luad_phos_cd274_temp  %>%
+  wilcox_test(`S279s ` ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+stat_phos1.test$p.adj <- sprintf("%.2e", stat_phos1.test$p.adj)
+
+pdl1_phos1 <- ggplot(luad_phos_cd274_temp, aes(x = Subtype, y = `S279s `))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="S279" ,y="Phosphorylation Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(stat_phos1.test, label = "p.adj", hide.ns = TRUE,tip.length = 0.005)
+
+stat_phos2.test <- luad_phos_cd274_temp  %>%
+  wilcox_test(`S283s ` ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+stat_phos2.test$p.adj <- sprintf("%.2e", stat_phos2.test$p.adj)
+
+pdl1_phos2 <- ggplot(luad_phos_cd274_temp, aes(x = Subtype, y = `S283s `))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="S283")+
+        stat_pvalue_manual(stat_phos2.test, label = "p.adj", hide.ns = TRUE,tip.length = 0.005)
+
+stat_phos3.test <- luad_phos_cd274_temp  %>%
+  wilcox_test(`T290t ` ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+stat_phos3.test$p.adj <- sprintf("%.2e", stat_phos3.test$p.adj)
+
+pdl1_phos3 <- ggplot(luad_phos_cd274_temp, aes(x = Subtype, y = `T290t `))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="T290")+
+        stat_pvalue_manual(stat_phos3.test, label = "p.adj", hide.ns = TRUE,tip.length = 0.005)
+
+#arrange 3 plots together
+Pdl1_phos_sites_combined<- ggarrange( pdl1_phos1+
+               theme(axis.ticks.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                     plot.margin = margin(r = 1, l = 1)),
+           
+          pdl1_phos2+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          
+           
+          pdl1_phos3+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                    axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          common.legend = TRUE, legend = "bottom",
+         ncol=3,nrow = 1, align = "hv")
+      
+
+
+
+ 
+
+
+```
+
+#### Subtypes pathway enrichment plots
+
+```{r}
+#Upload Table S13 Differential expression results for proteomic data
+luad_ttest <- read.csv(file="Table S13",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+
+#upload relevant immune genesets from MsigDB
+#Use the following genesets
+#Hallmark_inflammatory_response
+#Hallmark_IL2_stat
+#Hallmark_IL6_Jak_stat
+#Hallmark_interferon_alpha_response
+#Hallmark_interferon_gamma_response
+#Hallmark_TNF_NFKB
+
+#compare first to protein levels in each subtype DE
+#Add pathway annotation to each gene
+luad_ttest$genes_group <- "Null"
+luad_ttest$genes_group[luad_ttest$GeneSymbol %in% infl_resp_list]<-"Inflammatory response"
+luad_ttest$genes_group[luad_ttest$GeneSymbol %in% il2_stat_list]<-"IL2-STAT"
+luad_ttest$genes_group[luad_ttest$GeneSymbol %in% il6_jak_stat_list]<-"IL6-JAK-STAT"
+luad_ttest$genes_group[luad_ttest$GeneSymbol %in% infa_list]<-"Interferon Alpha"
+luad_ttest$genes_group[luad_ttest$GeneSymbol %in% infg_list]<-"Interferon Gamma"
+luad_ttest$genes_group[luad_ttest$GeneSymbol %in% tnf_nfkb_list]<-"TNF-NFKB"
+luad_ttest_cut <- luad_ttest[which(luad_ttest$genes_group!="Null"),]
+
+require(tidyr)
+library(tidyr)
+luad_ttest_cut_temp <- luad_ttest_cut[,c(1,3,5,11)]
+luad_ttest_cut.long <- gather(luad_ttest_cut_temp, variable,value, -genes_group)
+luad_ttest_cut.long$Subtype <- gsub("logfc_s3_all","S3", luad_ttest_cut.long$variable)
+luad_ttest_cut.long$Subtype <- gsub("logfc_s4_all","S4", luad_ttest_cut.long$Subtype)
+luad_ttest_cut.long$Subtype <- gsub("logfc_s5_all","S5", luad_ttest_cut.long$Subtype)
+
+#Generate Figure 4E - proteomic
+
+subtype_comp<-list(c("S3","S4"),c("S4","S5"),c("S5","S3"))
+immune_prot_plot <- ggplot(luad_ttest_cut.long, aes(x = Subtype, y = value))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(y= "Protein abundance LogFC", x= "Subtype")+
+        facet_wrap(~genes_group)+
+        stat_compare_means(comparisons=subtype_comp, method="wilcox.test",hide.ns= TRUE, label.y = c(2,3,4))+
+        ggsave(file="/working_directory/immune_prot_plot.pdf",width=11, height=10)
+
+#Upload Table S14 Differential expression results for phosphoproteomic data
+luad_phos_ttest <- read.csv(file="Table S14",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+
+#upload relevant immune genesets from MsigDB- use the same genesets as listed above
+
+luad_phos_ttest$genes_group <- "Null"
+luad_phos_ttest$genes_group[luad_phos_ttest$GeneSymbol %in% infl_resp_list]<-"Inflammatory response"
+luad_phos_ttest$genes_group[luad_phos_ttest$GeneSymbol %in% il2_stat_list]<-"IL2-STAT"
+luad_phos_ttest$genes_group[luad_phos_ttest$GeneSymbol %in% il6_jak_stat_list]<-"IL6-JAK-STAT"
+luad_phos_ttest$genes_group[luad_phos_ttest$GeneSymbol %in% infa_list]<-"Interferon Alpha"
+luad_phos_ttest$genes_group[luad_phos_ttest$GeneSymbol %in% infg_list]<-"Interferon Gamma"
+luad_phos_ttest$genes_group[luad_phos_ttest$GeneSymbol %in% tnf_nfkb_list]<-"TNF-NFKB"
+luad_phos_ttest_cut <- luad_phos_ttest[which(luad_phos_ttest$genes_group!="Null"),]
+
+require(tidyr)
+luad_phos_ttest_cut_temp <- luad_phos_ttest_cut[,c(1,3,5,11)]
+luad_phos_ttest_cut.long <- gather(luad_phos_ttest_cut_temp, variable,value, -genes_group)
+luad_phos_ttest_cut.long$Subtype <- gsub("logfc_s3_all","S3", luad_phos_ttest_cut.long$variable)
+luad_phos_ttest_cut.long$Subtype <- gsub("logfc_s4_all","S4", luad_phos_ttest_cut.long$Subtype)
+luad_phos_ttest_cut.long$Subtype <- gsub("logfc_s5_all","S5", luad_phos_ttest_cut.long$Subtype)
+
+#Generate Figure 4E - Phosphorylation 
+immune_phos_plot <- ggplot(luad_phos_ttest_cut.long, aes(x = Subtype, y = value))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.05)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(y= "Phosphorylation abundance LogFC", x= "Subtype")+
+        facet_wrap(~genes_group)+
+        stat_compare_means(comparisons=subtype_comp, method="wilcox.test",hide.ns= TRUE, label = "p.adj",label.y = c(2.5,3.5,4.5))+
+        ggsave(file="/working_directory/immune_phos_plot.pdf",width=11, height=10)
+
+
+```
+
+
+#### Analyze experimental growth assays
+
+```{r}
+#Upload Table S17 Tivantinib response table
+tivantinib_response <- read.csv(file="Table S17",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+
+tivantinib_response<-as.data.frame(tivantinib_response)
+tivantinib_response$`response to Met (percent)`
+tivantinib_response_cut <- tivantinib_response[which(tivantinib_response$Subtype!="Unassigned"),]
+
+#plot the data by S3 vs S4 - Figure 5A
+MET_response<- ggplot(tivantinib_response_cut,aes(x= Subtype, y=`response to Met (percent)`,fill=Subtype))+
+    geom_boxplot(varwidth=T, alpha = 0.9, outlier.shape=NA)+
+    geom_jitter(alpha=0.1)+
+    scale_fill_manual(values=c("#875692", "#F38400"))+
+    theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    labs(title="Tivantinib response", x="Subtype", y="Tivantinib response (percent)")+
+    stat_compare_means( method = "wilcox.test",label = "p.format")+       ggsave(file="/working_directory/MET_response_updated_no_unassigned.pdf",width=7, height=5.5)
+
+#Upload Upload Table S18 PD-L1 Fluorescence data
+#Fluorescence quantification for PD-L1 response to Met inhibition (without unassigned group)
+fluoro_response<- read.csv(file="Table S18",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+FLUORO
+fluoro_response<-as.data.frame(fluoro_response)
+fluoro_response_cut <- fluoro_response[which(fluoro_response$Subtype!="Unassigned"),]
+
+#plot the data by DMSO vs Tivantinib - Figure 5C
+my_comparisons_response_flu <- list(c("Tivantinib", "DMSO"))
+ggplot(fluoro_response_cut,aes(x= Treatment, y=Fluoresence,fill=Subtype))+
+    geom_boxplot(varwidth=T, alpha = 0.9, outlier.shape=NA)+
+    geom_jitter(alpha=0.1)+
+      scale_fill_manual(values=c("#875692", "#F38400"))+
+    theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    labs(title="PD-L1 upregulation",X= "Treatment", y="Fluorescence (AU)")+
+    stat_compare_means(comparisons=my_comparisons_response_flu, method = "wilcox.test",label = "p.format")+       ggsave(file="/working_directory/pdl1_response_Fluorescence_no_unassigned.pdf",width=7, height=5.5)
+
+```
+
+#### CPTAC - Sup Figures
+# CDK 4 vulnerability in S3 (Fig S5)
+```{r}
+#Upload Table S10 for all CDK4/6 response 
+#Experimental assay in response to CDK4/6 inhibitors (Palbociclib/ CINK4)- Figure S5C
+# Palbociclib treatment
+palb_response <-  read.csv(file="Table S10",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+
+palb_response<-as.data.frame(palb_response)
+palb_response$Subtype <- gsub("Control","Unassigned",palb_response$Subtype)
+my_comparisons_response <- list(c("S3", "S4"),c("S3", "Unassigned"),c("S4", "Unassigned"))
+ggplot(palb_response,aes(x= Subtype, y=`reverse response to CDK4/6 percent`,fill=Subtype))+
+    geom_boxplot(varwidth=T, alpha = 0.9, outlier.shape=NA)+
+    geom_jitter(alpha=0.1)+
+    scale_fill_manual(values=c("#875692", "#F38400","#D3D3D3"))+
+    theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    labs(title="Palbociclib response", x="Subtype", y="Palbociclib response (percent)")+
+    stat_compare_means(comparisons=my_comparisons_response, method = "wilcox.test",label = "p.format")+       ggsave(file="/working_directory/palb_response_updated.pdf",width=7, height=5.5)
+
+#CINK 4 treatment
+cdk4_6_response <-  read.csv(file="Table S10",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+cdk4_6_response<-as.data.frame(cdk4_6_response)
+my_comparisons_response <- list(c("S3", "S4"),c("S3", "Unassigned"),c("S4", "Unassigned"))
+ggplot(cdk4_6_response,aes(x= Subtype, y=`response to CDK4/6`,fill=Subtype))+
+    geom_boxplot(varwidth=T, alpha = 0.9, outlier.shape=NA)+
+    geom_jitter(alpha=0.1)+
+    scale_fill_manual(values=c("#875692", "#F38400","#D3D3D3"))+
+    theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    labs(title="CINK4 response", x="Subtype", y="CDK4 inhibitor IV (percent)")+
+    stat_compare_means(comparisons=my_comparisons_response, method = "wilcox.test",label = "p.format")+       ggsave(file="/working_directory/cdk4_response_updated.pdf",width=7, height=5.5)
+
+#combined response CDK4/6
+comb_response <- read.csv(file="Table S10",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+comb_response<-as.data.frame(comb_response)
+comb_response$Subtype <- gsub("Control","Unassigned",comb_response$Subtype)
+my_comparisons_response <- list(c("S3", "S4"),c("S3", "Unassigned"),c("S4", "Unassigned"))
+ggplot(comb_response,aes(x= Subtype, y=`Combined response percent`,fill=Subtype))+
+    geom_boxplot(varwidth=T, alpha = 0.9, outlier.shape=NA)+
+    geom_jitter(alpha=0.1)+
+    scale_fill_manual(values=c("#875692", "#F38400", "#D3D3D3"))+
+    theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    labs(title="CDK4/6 response", x="Subtype", y="CDK4/6 response (percent)")+
+    stat_compare_means(comparisons=my_comparisons_response, method = "wilcox.test",label = "p.signif")+
+  ggsave(file="/working_directory/cdk4_6_response_updated.pdf",width=7, height=5.5)
+
+
+```
+
+## Ethnicity (Fig S6B)
+```{r}
+#CPTAC ethnicity data can be obtained from Table S3A clinical annotations from Gillete et al.
+#create ethnicity pie charts
+Luad_ethnicity <- read.csv(file="Table S3A",stringsAsFactors = F, header = T,sep="\t", skip = 2)
+luad_cluster$Ethnicity <- Luad_ethnicity$Ethnicity[match(luad_cluster$submitter_id_modified,luad_samp$Sample.ID)]
+
+#Create a Pie Chart for each subtype
+#All
+df <- data.frame(
+  group = c("NA", "Asian", "Black or African American", "Caucasian", "European", "Han", "Hispanic", "White"),
+            "#958cb4", "#82984b", "#c5a82f","#c97b63","#5e7ca2","#005813","#d58d1f","#68a0b2")
+  value = c(3,45, 1, 35, 5,18, 2, 1)
+  
+head(df)
+#standardized colors-
+#Caucasian-blue #3f9db5
+#Asian- #82984b
+#Black or African American- #c5a82f
+#NA-#958cb4
+#White-#68a0b2
+#European-blue- #5e7ca2
+#Han-green-#005813
+#Hispanic-orange- #d58d1f
+ 
+# Create a basic bar
+bp<- ggplot(df, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+bp
+pie<- ggplot(df, aes(x="", y=share, fill=brand)) + geom_bar(stat="identity", width=1)
+ 
+# Convert to pie (polar coordinates) and add labels
+pie <- bp + coord_polar("y", start=0)
+pie
+
+# Add color scale (hex colors)
+pie <- pie + scale_fill_manual(values=c("#82984b", "#c5a82f","#3f9db5", "#5e7ca2","#005813","#d58d1f","#958cb4", "#68a0b2")) 
+ 
+# Remove labels and add title
+pie <- pie + labs(x = NULL, y = NULL, fill = NULL, title = "Etnicity distribution- full")
+ 
+# Tidy up the theme
+pie <- pie + theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, color = "#666666"))
+#S3 chart
+df_S3 <- data.frame(
+  group = c("NA", "Asian", "European", "Han"),
+  value = c(1,4, 1, 5)
+  )
+head(df_S3)
+ 
+# Create a basic bar
+bp_S3<- ggplot(df_S3, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+bp_S3
+pie_S3<- ggplot(df_S3, aes(x="", y=share, fill=brand)) + geom_bar(stat="identity", width=1)
+
+# Convert to pie (polar coordinates) and add labels
+pie_S3 <- bp_S3 + coord_polar("y", start=0)
+pie_S3
+
+# Add color scale (hex colors)
+pie_S3 <- pie_S3 + scale_fill_manual(values=c("#82984b", "#5e7ca2", "#005813", "#958cb4")) 
+ 
+# Remove labels and add title
+pie_S3 <- pie_S3 + labs(x = NULL, y = NULL, fill = NULL, title = "Etnicity distribution- S3")
+ 
+# Tidy up the theme
+pie_S3 <- pie_S3 + theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+#S4 chart
+df_S4 <- data.frame(
+  group = c("NA", "Asian", "Caucasian", "White"),
+  value = c(1,5,3, 1)
+  )
+head(df_S4)
+ 
+# Create a basic bar
+bp_S4<- ggplot(df_S4, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+bp_S4
+pie_S4<- ggplot(df_S4, aes(x="", y=share, fill=brand)) + geom_bar(stat="identity", width=1)
+ 
+# Convert to pie (polar coordinates) and add labels
+pie_S4 <- bp_S4 + coord_polar("y", start=0)
+pie_S4
+
+# Add color scale (hex colors)
+pie_S4 <- pie_S4 + scale_fill_manual(values=c("#82984b", "#3f9db5", "#958cb4", "#68a0b2")) 
+ 
+# Remove labels and add title
+pie_S4 <- pie_S4 + labs(x = NULL, y = NULL, fill = NULL, title = "Etnicity distribution- S4")
+ 
+# Tidy up the theme
+pie_S4 <- pie_S4 + theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+#S5 chart
+df_S5 <- data.frame(
+  group = c("NA", "Asian", "Black or African American", "Caucasian", "European", "Han", "Hispanic"),
+  value = c(1,15,1, 19,2,11,2)
+  )
+head(df_S5)
+ 
+# Create a basic bar
+bp_S5<- ggplot(df_S5, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+bp_S5
+pie_S5<- ggplot(df_S5, aes(x="", y=share, fill=brand)) + geom_bar(stat="identity", width=1)
+ 
+# Convert to pie (polar coordinates) and add labels
+pie_S5 <- bp_S5 + coord_polar("y", start=0)
+pie_S5
+
+# Add color scale (hex colors)
+pie_S5 <- pie_S5 + scale_fill_manual(values=c("#82984b", "#c5a82f","#3f9db5", "#5e7ca2","#005813","#d58d1f","#958cb4")) 
+ 
+# Remove labels and add title
+pie_S5 <- pie_S5 + labs(x = NULL, y = NULL, fill = NULL, title = "Etnicity distribution- S5")
+ 
+# Tidy up the theme
+pie_S5 <- pie_S5 + theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+pie_S5
+
+##create ethnicity pie charts for TCGA data
+#Please refer to the LUAD clinical data table GDC Data Portal (https://portal.gdc.cancer.gov/)
+tcga_luad_etnicity <- read.delim(file="TCGA_LUAD_race_subtype_info.tsv", header = T)
+table(tcga_luad_etnicity$race)
+df_tcga <- data.frame(
+  group = c("American Indian or Alaska Native", "Asian", "Black or African American", "NA", "White"),
+  value = c(1,7,52,66,383)
+  )
+head(df_tcga)
+
+#standarized colors-
+#American Indian or Alaska Native-#c97b63
+#Asian- #82984b
+#Black or African American- #c5a82f
+#Na-#958cb4
+#White-#68a0b2
+ 
+# Create a basic bar
+bp_tcga <- ggplot(df_tcga, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+bp_tcga
+pie_tcga_full <- ggplot(df_tcga, aes(x="", y=share, fill=brand)) + geom_bar(stat="identity", width=1)
+ 
+# Convert to pie (polar coordinates) and add labels
+pie_tcga_full <- bp_tcga + coord_polar("y", start=0)
+pie_tcga_full
+
+# Add color scale (hex colors)
+pie_tcga_full <- pie_tcga_full + scale_fill_manual(values=c("#c97b63", "#82984b", "#c5a82f","#958cb4", "#68a0b2")) 
+ 
+# Remove labels and add title
+pie_tcga_full <- pie_tcga_full + labs(x = NULL, y = NULL, fill = NULL, title = "Etnicity distribution- full")
+ 
+# Tidy up the theme
+pie_tcga_full <- pie_tcga_full + theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+#S3 chart
+tcga_S3 <- tcga_luad_etnicity[which(tcga_luad_etnicity$subtype=="S3"),]
+df_tcga_S3 <- data.frame(
+  group = c("Black or African American", "NA", "White"),
+  value = c(11,17,77)
+  )
+head(df_tcga_S3)
+ 
+# Create a basic bar
+bp_tcga_S3<- ggplot(df_tcga_S3, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+bp_tcga_S3
+pie_tcga_S3<- ggplot(df_tcga_S3, aes(x="", y=share, fill=brand)) + geom_bar(stat="identity", width=1)
+
+# Convert to pie (polar coordinates) and add labels
+pie_tcga_S3 <- bp_tcga_S3 + coord_polar("y", start=0)
+pie_tcga_S3
+
+# Add color scale (hex colors)
+pie_tcga_S3 <- pie_tcga_S3 + scale_fill_manual(values=c("#c5a82f", "#958cb4", "#68a0b2")) 
+ 
+# Remove labels and add title
+pie_tcga_S3 <- pie_tcga_S3 + labs(x = NULL, y = NULL, fill = NULL, title = "Etnicity distribution- S3")
+ 
+# Tidy up the theme
+pie_tcga_S3 <- pie_tcga_S3 + theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, color = c("#666666")))
+
+#S4 chart
+tcga_S4 <- tcga_luad_etnicity[which(tcga_luad_etnicity$subtype=="S4"),]
+df_tcga_S4 <- data.frame(
+  group = c("NA", "Asian", "Black or African American", "White"),
+  value = c(22,2,19, 103)
+  )
+head(df_tcga_S4)
+
+# Create a basic bar
+bp_tcga_S4<- ggplot(df_tcga_S4, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+bp_tcga_S4
+pie_tcga_S4<- ggplot(df_tcga_S4, aes(x="", y=share, fill=brand)) + geom_bar(stat="identity", width=1)
+ 
+# Convert to pie (polar coordinates) and add labels
+pie_tcga_S4 <- bp_tcga_S4 + coord_polar("y", start=0)
+pie_tcga_S4
+
+# Add color scale (hex colors)
+pie_tcga_S4 <- pie_tcga_S4 + scale_fill_manual(values=c("#82984b", "#c5a82f","#958cb4", "#68a0b2")) 
+ 
+# Remove labels and add title
+pie_tcga_S4 <- pie_tcga_S4 + labs(x = NULL, y = NULL, fill = NULL, title = "Etnicity distribution- S4")
+ 
+# Tidy up the theme
+pie_tcga_S4 <- pie_tcga_S4 + theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+#S5 chart
+tcga_S5 <- tcga_luad_etnicity[which(tcga_luad_etnicity$subtype=="S5"),]
+df_tcga_S5 <- data.frame(
+  group = c("NA", "Asian", "Black or African American","White"),
+  value = c(20,3,13,142)
+  )
+head(df_tcga_S5)
+
+ 
+# Create a basic bar
+bp_tcga_S5<- ggplot(df_tcga_S5, aes(x="", y=value, fill=group))+
+geom_bar(width = 1, stat = "identity")
+bp_tcga_S5
+pie_tcga_S5<- ggplot(df_tcga_S5, aes(x="", y=share, fill=brand)) + geom_bar(stat="identity", width=1)
+ 
+# Convert to pie (polar coordinates) and add labels
+pie_tcga_S5 <- bp_tcga_S5 + coord_polar("y", start=0)
+pie_tcga_S5
+
+# Add color scale (hex colors)
+pie_tcga_S5<- pie_tcga_S5 + scale_fill_manual(values=c("#82984b", "#c5a82f","#958cb4", "#68a0b2")) 
+ 
+# Remove labels and add title
+pie_tcga_S5 <- pie_tcga_S5 + labs(x = NULL, y = NULL, fill = NULL, title = "Etnicity distribution- S5")
+ 
+# Tidy up the theme
+pie_tcga_S5 <- pie_tcga_S5 + theme_classic() + theme(axis.line = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          plot.title = element_text(hjust = 0.5, color = "#666666"))
+
+
+
+```
+
+
+## CPTAC LUAD expression subtypes and protein expression of genes with recurrent SCNAs (Fig S6C-D)
+```{r}
+#Figure S6C - Tumor only
+#same plots as CNA in main figure 4C - without NAT
+met_g3_gain_temp_nat <- g3_gain_temp[which(g3_gain_temp$subtype!="NAT"),]
+
+#MET_gain_no NAT
+met_gain_no_nat_stat <- met_g3_gain_temp_nat  %>%
+  wilcox_test(MET ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+met_gain_no_nat_stat$p.adj <- sprintf("%.2e", met_gain_no_nat_stat$p.adj)
+met_gain_no_NAT <- ggplot(met_g3_gain_temp_nat, aes(x = subtype, y = MET))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=MET_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "MET" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(met_gain_no_nat_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+
+#PIK3CA_gain_no NAT
+pik3ca_gain_stat <- met_g3_gain_temp_nat  %>%
+  wilcox_test(PIK3CA ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+pik3ca_gain_stat$p.adj <- sprintf("%.2e", pik3ca_gain_stat$p.adj)
+pik3ca_gain_no_nat <- ggplot(met_g3_gain_temp_nat, aes(x = subtype, y = PIK3CA))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=PIK3CA_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "PIK3CA" ,y="Protein levels")+
+        ylim(-2,2.5)+
+        stat_pvalue_manual(pik3ca_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+
+#JAK2_gain_no_nat         
+jak2_gain_stat <- met_g3_gain_temp_nat  %>%
+  wilcox_test(JAK2 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+jak2_gain_stat$p.adj <- sprintf("%.2e", jak2_gain_stat$p.adj)
+
+jak2_gain_no_nat <- ggplot(met_g3_gain_temp_nat, aes(x = subtype, y = JAK2))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=JAK2_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "JAK2" ,y="Protein levels")+
+        stat_pvalue_manual(jak2_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+
+#PAK1_gain_no_nat       
+pak1_gain_stat <- met_g3_gain_temp_nat  %>%
+  wilcox_test(PAK1 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+pak1_gain_stat$p.adj <- sprintf("%.2e", pak1_gain_stat$p.adj)
+
+pak1_gain_no_nat <- ggplot(met_g3_gain_temp_nat, aes(x = subtype, y = PAK1))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=PAK1_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "PAK1" ,y="Protein levels")+
+        stat_pvalue_manual(pak1_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+
+#MCL1_gain_no_nat        
+mcl1_gain_stat <- met_g3_gain_temp_nat  %>%
+  wilcox_test(MCL1 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+mcl1_gain_stat$p.adj <- sprintf("%.2e", mcl1_gain_stat$p.adj)
+
+mcl1_gain_no_nat <- ggplot(met_g3_gain_temp_nat, aes(x = subtype, y = MCL1))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=MCL1_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "MCL1" ,y="Protein levels")+
+        stat_pvalue_manual(mcl1_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+
+#KRAS_gain_no_nat        
+kras_gain_stat <- met_g3_gain_temp_nat  %>%
+  wilcox_test(KRAS ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+kras_gain_stat$p.adj <- sprintf("%.2e", kras_gain_stat$p.adj)
+
+kras_gain_no_nat <- ggplot(met_g3_gain_temp_nat, aes(x = subtype, y = KRAS))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=KRAS_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "KRAS" ,y="Protein levels")+
+        stat_pvalue_manual(kras_gain_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+
+#CD274_gain no NAT
+cd274_gain_no_nat_stat <- met_g3_gain_temp_nat  %>%
+  wilcox_test(CD274 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+cd274_gain_no_nat_stat$p.adj <- sprintf("%.2e", cd274_gain_no_nat_stat$p.adj)
+
+cd274_gain_no_NAT <- ggplot(met_g3_gain_temp_nat, aes(x = subtype, y = CD274))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=CD274_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "CD274" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(cd274_gain_no_nat_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+
+#arrange 7 plots together
+genomic_gained_sites_combined_tumor_only <- ggarrange( met_gain_no_NAT+
+               theme(axis.ticks.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                     plot.margin = margin(r = 1, l = 1)),
+           
+            cd274_gain_no_NAT+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          pak1_gain_no_nat+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          jak2_gain_no_nat+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          pik3ca_gain_no_nat+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          mcl1_gain_no_nat+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+           
+          kras_gain_no_nat+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                    axis.title.x=element_blank(),
+                  plot.margin = margin(r = 1, l = 1)),
+          common.legend = TRUE, legend = "bottom",
+         ncol=7,nrow = 1,widths =c(4.5,3,3,3,3,3,3))
+
+#replace in all plots lost_temp with lost_temp_no_nat
+#MET_gain_no NAT
+lost_temp_no_nat <- lost_temp[which(lost_temp$subtype!="NAT"),]
+
+#FAT1_loss
+#FAT1_loss_no_nat
+fat1_loss_stat <- lost_temp_no_nat  %>%
+  wilcox_test(FAT1 ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+fat1_loss_no_nat <- ggplot(lossed_temp, aes(x = subtype, y = FAT1))+
+        geom_boxplot(aes(lost_temp_no_nat = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=FAT1_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "FAT1" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(fat1_loss_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+        
+#KDM6A_loss
+kdm6a_loss_stat <- lost_temp_no_nat  %>%
+  wilcox_test(KDM6A ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+kdm6a_loss_no_nat <- ggplot(lost_temp_no_nat, aes(x = subtype, y = KDM6A))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9)+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "KDM6A")+
+        stat_pvalue_manual(kdm6a_loss_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+        
+  #PDE4D_loss_no_nat
+pde4d_loss_stat <- lost_temp_no_nat  %>%
+  wilcox_test(PDE4D ~ subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "subtype")
+set.seed(1)
+pde4d_loss_no_nat <- ggplot(lost_temp_no_nat, aes(x = subtype, y = PDE4D))+
+        geom_boxplot(aes(fill = subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=PDE4D_cna))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "PDE4D")+
+        stat_pvalue_manual(pde4d_loss_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005)
+
+
+#arrange 3 plots together
+genomic_lossed_sites_combined_no_nat<- ggarrange( fat1_loss_no_nat+
+               theme(axis.ticks.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                     axis.title.x=element_blank()),
+                    # plot.margin = margin(r = 1, l = 1)),
+           
+          
+        pde4d_loss_no_nat+
+            theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                    axis.title.x=element_blank()),
+                 #plot.margin = margin(r = 1, l = 1)),
+        
+        kdm6a_loss_no_nat+
+          theme(axis.text.y = element_blank(),
+                     axis.ticks.y = element_blank(),
+                     axis.title.y = element_blank(),
+                     axis.ticks.x = element_blank(),
+                     axis.text.x = element_blank(),
+                    axis.title.x=element_blank()),
+                 #plot.margin = margin(r = 1, l = 1)),
+        
+        common.legend = TRUE, legend = "right",
+         ncol=3,nrow = 1,widths =c(3.5,3,3))
+genomic_lossed_sites_combined_no_nat
+
+
+#Figure S6D
+luad_met_S3_nat_temp <- S3_gain_temp[which(S3_gain_temp$subtype=="S3"| S3_gain_temp$subtype=="NAT"),]
+
+ggplot(luad_met_S3_nat_temp, aes(x = subtype, y = MET))+
+        geom_boxplot(aes(fill = type), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#e75480", "#875692"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="MET", x="Type", y="Protein abundance(Log2 Ratio)")+
+        stat_compare_means(label.x = 1.4)+
+        ggsave(file="/working_directory/MET_prot_S3_nat_plot.pdf",width=7, height=5.5)
+
+#MET_S4- tumor normal
+
+luad_met_s4_nat_temp <- S3_gain_temp[which(S3_gain_temp$subtype=="S4"| S3_gain_temp$subtype=="NAT"),]
+
+ggplot(luad_met_s4_nat_temp, aes(x = subtype, y = MET))+
+        geom_boxplot(aes(fill = type), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#e75480", "#F38400"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="MET", x="Type", y="Protein abundance(Log2 Ratio)")+
+        stat_compare_means(label.x = 1.4)+
+        ggsave(file="/working_directory/MET_prot_S4_nat_plot.pdf",width=7,height=5.5)
+
+
+```
+
+## Fig S8A-B 
+```{r}
+#Figure S8A - Phosphorylation levels and protein abundance of genes supporting MET pathway activation in S3 versus S4. 
+
+#Gab1 phosphorylation sites
+luad_phos_gab1 <- luad_phos_tumor_only[luad_phos_tumor_only$GeneSymbol=="GAB1",]
+rownames(luad_phos_gab1) <- luad_phos_gab1$variableSites
+luad_phos_gab1_temp <- as.data.frame(t(luad_phos_gab1[,1:110]))
+luad_phos_gab1_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_phos_gab1_temp),row.names(luad_cluster))]
+luad_phos_gab1_temp <- luad_phos_gab1_temp[which(luad_phos_gab1_temp$Subtype != "S1" & luad_phos_gab1_temp$Subtype != "S2"& luad_phos_gab1_temp$Subtype != "S5"& luad_phos_gab1_temp$Subtype != "Unassigned"),]
+
+gab1_phos_df <- melt(luad_phos_gab1_temp, id.var = "Subtype")
+gab1_phos_df$value <- as.numeric(gab1_phos_df$value)
+
+
+gab1_phos_plot <- ggplot(gab1_phos_df, aes(x = variable, y = value))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 7)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="GAB1" ,x= "Variable site",y="Phosphorylation Abundance(Log2 Ratio)")+
+        stat_compare_means(aes(group = Subtype), label = "p.signif")+
+  ggsave(file="/working_directory/GAB1_phos_plot.pdf",width=15,height=6)
+
+
+#Pak2 - protein
+colnames(luad_prot_tumor_only)
+luad_pak2 <- luad_prot_tumor_only[luad_prot_tumor_only$GeneSymbol=="PAK2",]
+rownames(luad_pak2) <- luad_pak2$GeneSymbol
+luad_pak2_temp <- as.data.frame(t(luad_pak2[,1:110]))
+luad_pak2_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_pak2_temp),row.names(luad_cluster))]
+luad_pak2_temp <- luad_pak2_temp[which(luad_pak2_temp$Subtype!= "S1"& luad_pak2_temp$Subtype!= "S2"),]
+
+luad_pak2_temp_stat <- luad_pak2_temp  %>%
+  wilcox_test(PAK2 ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+pak2_prot <- ggplot(luad_pak2_temp, aes(x = Subtype, y = PAK2))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "PAK2" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(luad_pak2_temp_stat,label = "p.adj.signif", tip.length = 0.001,step.increase= 0.03)+
+        ggsave(file="/working_directory/PAK2_prot_plot.pdf",width=7,height=5.5)
+
+#BCL2L1
+colnames(luad_prot_tumor_only)
+luad_bcl2l1 <- luad_prot_tumor_only[luad_prot_tumor_only$GeneSymbol=="BCL2L1",]
+rownames(luad_bcl2l1) <- luad_bcl2l1$GeneSymbol
+luad_bcl2l1_temp <- as.data.frame(t(luad_bcl2l1[,1:110]))
+luad_bcl2l1_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_bcl2l1_temp),row.names(luad_cluster))]
+luad_bcl2l1_temp <- luad_bcl2l1_temp[which(luad_bcl2l1_temp$Subtype!= "S1"& luad_bcl2l1_temp$Subtype!= "S2"),]
+
+luad_bcl2l1_temp_stat <- luad_bcl2l1_temp  %>%
+  wilcox_test(BCL2L1 ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+bcl2l1_prot <- ggplot(luad_bcl2l1_temp, aes(x = Subtype, y = BCL2L1))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "BCL2L1" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(luad_bcl2l1_temp_stat,label = "p.adj.signif", tip.length = 0.001,step.increase= 0.03)+
+        ggsave(file="/working_directory/BCL2L1_prot_plot.pdf",width=7,height=5.5)
+
+#RB1
+colnames(luad_prot_tumor_only)
+luad_rb1 <- luad_prot_tumor_only[luad_prot_tumor_only$GeneSymbol=="RB1",]
+rownames(luad_rb1) <- luad_rb1$GeneSymbol
+luad_rb1_temp <- as.data.frame(t(luad_rb1[,1:110]))
+luad_rb1_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_rb1_temp),row.names(luad_cluster))]
+luad_rb1_temp <- luad_rb1_temp[which(luad_rb1_temp$Subtype!= "S1"& luad_rb1_temp$Subtype!= "S2"),]
+
+luad_rb1_temp_stat <- luad_rb1_temp  %>%
+  wilcox_test(RB1 ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+rb1_prot <- ggplot(luad_rb1_temp, aes(x = Subtype, y = RB1))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "RB1" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(luad_rb1_temp_stat,label = "p.adj.signif", tip.length = 0.001,step.increase= 0.03)+
+        ggsave(file="/working_directory/RB1_prot_plot.pdf",width=7,height=5.5)
+
+
+#Figure S8B - protein abundance of genes involved in antigen presentation and interferon signaling among CPTAC LUAD expression subtypes. 
+
+#TAPBP
+colnames(luad_prot_tumor_only)
+luad_tapbp <- luad_prot_tumor_only[luad_prot_tumor_only$GeneSymbol=="TAPBP",]
+rownames(luad_tapbp) <- luad_tapbp$GeneSymbol
+luad_tapbp_temp <- as.data.frame(t(luad_tapbp[,1:110]))
+luad_tapbp_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_tapbp_temp),row.names(luad_cluster))]
+luad_tapbp_temp <- luad_tapbp_temp[which(luad_tapbp_temp$Subtype!= "S1"& luad_tapbp_temp$Subtype!= "S2"),]
+
+luad_tapbp_temp_stat <- luad_tapbp_temp  %>%
+  wilcox_test(TAPBP ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+tapbp_prot <- ggplot(luad_tapbp_temp, aes(x = Subtype, y = TAPBP))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "TAPBP" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(luad_tapbp_temp_stat,label = "p.adj.signif", tip.length = 0.001,step.increase= 0.03)+
+        ggsave(file="/working_directory/TAPBP_prot_plot.pdf",width=7,height=5.5)
+
+#STAT1
+colnames(luad_prot_tumor_only)
+luad_stat1 <- luad_prot_tumor_only[luad_prot_tumor_only$GeneSymbol=="STAT1",]
+rownames(luad_stat1) <- luad_stat1$accession_number
+luad_stat1_temp <- as.data.frame(t(luad_stat1[,1:110]))
+luad_stat1_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_stat1_temp),row.names(luad_cluster))]
+luad_stat1_temp <- luad_stat1_temp[which(luad_stat1_temp$Subtype!= "S1"& luad_stat1_temp$Subtype!= "S2"),]
+
+luad_stat1_temp_stat <- luad_stat1_temp  %>%
+  wilcox_test(NP_644671.1 ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+luad_stat1_temp$NP_644671.1
+stat1_prot <- ggplot(luad_stat1_temp, aes(x = Subtype, y = NP_644671.1))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "STAT1" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(luad_stat1_temp_stat,label = "p.adj.signif", tip.length = 0.001,step.increase= 0.03)+
+        ggsave(file="/working_directory/STAT1_prot_plot.pdf",width=7,height=5.5)
+
+#IFI44L
+colnames(luad_prot_tumor_only)
+luad_ifi44l <- luad_prot_tumor_only[luad_prot_tumor_only$GeneSymbol=="IFI44L",]
+rownames(luad_ifi44l) <- luad_ifi44l$GeneSymbol
+luad_ifi44l_temp <- as.data.frame(t(luad_ifi44l[,1:110]))
+luad_ifi44l_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_ifi44l_temp),row.names(luad_cluster))]
+luad_ifi44l_temp <- luad_ifi44l_temp[which(luad_ifi44l_temp$Subtype!= "S1"& luad_ifi44l_temp$Subtype!= "S2"),]
+
+luad_ifi44l_temp_stat <- luad_ifi44l_temp  %>%
+  wilcox_test(IFI44L ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+ifi44l_prot <- ggplot(luad_ifi44l_temp, aes(x = Subtype, y = IFI44L))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "IFI44L" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(luad_ifi44l_temp_stat,label = "p.adj.signif", tip.length = 0.001,step.increase= 0.03)+
+        ggsave(file="/working_directory/IFI44L_prot_plot.pdf",width=7,height=5.5)
+
+
+#MT2A
+colnames(luad_prot_tumor_only)
+luad_mt2a <- luad_prot_tumor_only[luad_prot_tumor_only$GeneSymbol=="MT2A",]
+rownames(luad_mt2a) <- luad_mt2a$GeneSymbol
+luad_mt2a_temp <- as.data.frame(t(luad_mt2a[,1:110]))
+luad_mt2a_temp$Subtype <- luad_cluster$Subtypes[match(row.names(luad_mt2a_temp),row.names(luad_cluster))]
+luad_mt2a_temp <- luad_mt2a_temp[which(luad_mt2a_temp$Subtype!= "S1"& luad_mt2a_temp$Subtype!= "S2"),]
+
+luad_mt2a_temp_stat <- luad_mt2a_temp  %>%
+  wilcox_test(MT2A ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+mt2a_prot <- ggplot(luad_mt2a_temp, aes(x = Subtype, y = MT2A))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c("#875692", "#F38400","#A1CAF1","#D3D3D3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= "MT2A" ,y="Protein Abundance(Log2 Ratio)")+
+        stat_pvalue_manual(luad_mt2a_temp_stat,label = "p.adj.signif", tip.length = 0.001,step.increase= 0.03)+
+        ggsave(file="/working_directory/MT2A_prot_plot.pdf",width=7,height=5.5)
+
+
+
+```

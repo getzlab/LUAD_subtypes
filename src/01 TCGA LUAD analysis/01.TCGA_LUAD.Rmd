@@ -1,0 +1,2914 @@
+---
+title: "Roh, Geffen, Cha et al. 01 TCGA LUAD analysis"
+output: html_notebook
+---
+
+###### Import packages 
+
+```{r}
+
+library(miceadds)
+library(stringr)
+library(dplyr) # transform data
+library(biomaRt)
+library(readr)
+library(readxl)
+library(tidyr) # tidy data
+library(dplyr) # transform data
+library(magrittr) # piping
+library(stringr)
+library(ggplot2)
+library(gplots)
+library(RColorBrewer)
+library(reshape)
+library(ggrepel) # avoid overlapping of text labels
+library(reshape2)
+library(GSVA)
+library(fgsea)
+library(survival)
+library(survminer)
+library(xlsx)
+library(ggpubr)
+library(ComplexHeatmap)
+library(pals)
+library(circlize)
+library(maftools)
+library(taigr)
+library(tidyverse)
+library(rstatix)
+library(binom)
+library(PairedData)
+library(cvms)
+library(lsa)
+library(clues)
+
+sessioninfo::session_info()
+```
+
+###### Load TCGA LUAD RNA-seq data
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+tumor.type <- "LUAD"
+
+TUMOR <- read.delim("./input_data/20190523_LUAD_RNAseq.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+genes <- sapply(colnames(TUMOR), function(x){
+  strsplit(x,"_")[[1]][1]
+})
+
+genes <- genes[!genes %in% c("Barcode","TCGA","X.")]
+
+gene.symbols <- as.character(genes)
+
+TUMOR <- subset(TUMOR, TCGA_disease == tumor.type)
+
+TUMOR.GEXP <- TUMOR[,c("Barcode",names(genes))]
+colnames(TUMOR.GEXP) <- c("Sample",gene.symbols)
+
+TUMOR.GEXP.mat <- as.matrix(TUMOR.GEXP[,2:ncol(TUMOR.GEXP)])
+
+rownames(TUMOR.GEXP.mat) <- TUMOR.GEXP$Sample
+
+TUMOR.GEXP.mat <- t(TUMOR.GEXP.mat)
+# log2(x+1) transformation
+TUMOR.GEXP.log2.mat <- log2(TUMOR.GEXP.mat+1) 
+
+```
+
+###### Run BayesNMF
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+library(miceadds)
+source("./src/main.expression_clustering_simple.WR.R")
+
+set.seed(10)
+
+OUTPUT <- "./input_data/BayesNMF_output/"
+OUTPUT2 <- "./input_data/BayesNMF_output/"
+system(paste0("mkdir -p ",OUTPUT2))
+
+threshold.NA <- 0.1
+cut.NA <- 0.1 ## remove genes with more than 10% NA or zero values
+cut.bottom <- 0.1 ## filter out bottom 10% genes in terms of mean expression
+cut.sd <- 0.75 ## include genes with top 25% in terms of SD
+
+color.axis="grey" # color of sample names from H martix plot
+
+################################################
+####### expression data = RPKM.all = log2-normalized expression data (gene by sample)
+################################################
+
+RPKM.all <- TUMOR.GEXP.log2.mat
+
+# remove samples with all NAs
+RPKM.all <- RPKM.all[, colSums(is.na(RPKM.all)) != nrow(RPKM.all)] 
+
+RPKM.all[RPKM.all < threshold.NA] <- NA ## RPKM.all[RPKM.all == 0] <- NA.. You may choose your own threshold to make low expression values NA
+RPKM.all <- RPKM.all[rowSums(is.na(RPKM.all))<round(cut.NA*ncol(RPKM.all)),]
+x <- rowMeans(RPKM.all,na.rm=T)
+y <- RPKM.all[x >= quantile(x,prob=cut.bottom),] 
+sd <- apply(y,1,function(x) sd(x,na.rm=T))
+RPKM.sd <- y[sd >= quantile(sd,prob=cut.sd),] 
+
+####### transform to fold-changed expression 
+RPKM.fold <- t(apply(RPKM.sd,1,function(x) x-median(x,na.rm=T)))
+
+####### compute the spearman correlations among samples with selected genes above
+corr.all <- get.correlation.spearman(RPKM.fold)
+rownames(corr.all) <- colnames(RPKM.fold)
+colnames(corr.all) <- colnames(RPKM.fold)
+pdf(file=paste(OUTPUT,"correlation.ordered_by_HC.pdf",sep=""),width=8,height= 8)
+	plot.heatmap.3(corr.all,T,T,"Rank-correlation matrix")
+dev.off()
+save(corr.all,file=paste(OUTPUT,"corr.all.RData",sep=""))
+
+################# sample selection
+max.K <- 10 ### NMF iterations with varyig K up to max.K
+pItem <- 0.8 ### re-sampling rate = 80% = randomly choose 80% samples in each NMF iteration
+innerLinkage <- "average"
+finalLinkage <- "ward.D"
+n.base <- 500 ### # of basic NMF iterations for given K
+
+res.consensus <- get.consensus.mat(corr.all,max.K,pItem,innerLinkage,finalLinkage,n.base)
+consensus.mat <- res.consensus[[1]]
+consensus.norm <- res.consensus[[2]]
+save(consensus.mat,file=paste(OUTPUT,"consensus.mat.RData",sep=""))
+save(consensus.norm,file=paste(OUTPUT,"consensus.norm.RData",sep=""))
+
+x <- consensus.mat
+pdf(file=paste(OUTPUT,"consensus.ordered_by_HC.pdf",sep=""),width=8,height= 8)
+	plot.heatmap.3(x,T,T,"Consensus matrix by a hierarchical clustering")
+dev.off()
+
+############################################################
+################## NMF - sample discovery
+################## run Bayesian n.iter times
+############################################################
+n.iter <- 50 ## # of iterations 
+for (i in 1:n.iter) {
+	res.Bayes <- BayesNMF.L1EU(as.matrix(consensus.norm),200000,10,1.e-07,10,10,1.0)
+	save(res.Bayes,file=paste(OUTPUT,paste("res.L1EU.Bayes",i,"RData",sep="."),sep=""))
+}
+
+tmpK <- rep(0,n.iter)
+tmpE <- rep(0,n.iter)
+for (i in 1:n.iter) {
+	load(file=paste(OUTPUT,paste("res.L1EU.Bayes",i,"RData",sep="."),sep=""))
+	lambda <- res.Bayes[[5]]
+	lambda <- unlist(lambda[length(lambda)])
+	lambda <- lambda-min(lambda)
+	cat(lambda,sum(lambda!=0),'\n')
+	tmpK[i] <- sum(lambda > 0)
+	tmpE[i] <- res.Bayes[[4]][length(res.Bayes[[4]])]
+}
+
+################################################
+################ summary of BayesNMF runs
+#### df has all info for BayesNMF runs and please choose the run # with the lowest "evid" for given K (== runK)
+################################################
+df <- data.frame(seq(1:n.iter),tmpK,unlist(tmpE))
+colnames(df) <- c("run","K","evid")
+df <- df[order(df$evid,decreasing=T),]
+
+x <- table(tmpK)
+pdf(file=paste(OUTPUT,paste("BayesNMF.freq.pdf",sep="."),sep=""),width=4,height=5)
+s1 <- 1.5
+s2 <- 2.0
+par(mfrow=c(1,1))
+par(mar=c(5,5,2,1))
+        barplot(x,cex=s1,cex.axis=s1,cex.main=s1,cex.names=s1,cex.lab=s1,xlab="# of signatures",ylab="Freq.",main=paste(tumor.type,sep="."))
+dev.off()
+
+#########################################
+################ please specify the run with the lowest "evid" values for given K  = run.K
+#########################################
+
+run.K = min(subset(df,evid==min(subset(df,K==max(as.numeric(names(table(df$K))[table(df$K)==max(table(df$K))])))$evid))$run)
+
+load(file=paste(OUTPUT,paste("res.L1EU.Bayes",run.K,"RData",sep="."),sep=""))
+res.clust <- get.consensus.clustering(res.Bayes,consensus.norm)
+g.Bayes <- res.clust[[1]]
+save(g.Bayes,file=paste0(OUTPUT,"g.Bayes.RData")) ### cluster membership is saved here. The membership is determined by the maximum association of H
+
+ordering <- order(g.Bayes,decreasing=F)
+x <- corr.all
+y <- seq(1:nrow(x))
+rownames(x) <- y
+colnames(x) <- y
+pdf(file=paste(OUTPUT,"correlation.ordered.pdf",sep=""),width=8,height= 8)
+	plot.heatmap.3(x[ordering,ordering],F,F,"Rank-correlation matrix")
+dev.off()
+x <- consensus.mat
+rownames(x) <- y
+colnames(x) <- y
+pdf(file=paste(OUTPUT,"consensus.ordered.pdf",sep=""),width=8,height= 8)
+	plot.heatmap.3(x[ordering,ordering],F,F,"Consensus matrix")
+dev.off()
+
+################## plotting H matrix
+H <- res.Bayes[[2]]
+H <- H[rowSums(H)!=0,]
+K0 <- nrow(H)
+rownames(H) <- paste("G",seq(1:K0),sep="")
+H.norm <- apply(H,2,function(x) x/sum(x))
+
+res <- get.sample.association.heatmap(H,g.Bayes,1.0)
+p1 <- res[[1]]
+p2 <- res[[2]]
+p3 <- res[[3]]
+pdf(file=paste(OUTPUT,"H.ordered.pdf",sep=""),width=12,height=4)
+	plot(p1)
+dev.off()
+pdf(file=paste(OUTPUT,"H.norm.ordered.pdf",sep=""),width=12,height=4)
+	plot(p2)
+dev.off() 
+
+```
+
+###### Supervised clustering
+
+```{r fig.height=10, fig.width=15, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# Load the sample-subtype membership information (g.Bayes)
+
+OUTPUT_ttype <- "./input_data/BayesNMF_output/"
+
+load(file=paste(OUTPUT_ttype,"g.Bayes.RData",sep=""))
+
+df2 <- data.frame(sample=names(g.Bayes), g.Bayes=g.Bayes)
+
+threshold.NA <- 0.1
+cut.NA <- 0.1 ## remove genes with more than 10% NA or zero values
+cut.bottom <- 0.1 ## filter out bottom 10% genes in terms of mean expression
+cut.sd <- 0.75 ## include genes with top 25% in terms of SD
+
+# RSEM expression matrix
+RPKM.all <- TUMOR.GEXP.log2.mat
+RPKM.all[RPKM.all < threshold.NA] <- NA
+RPKM.all <- RPKM.all[rowSums(is.na(RPKM.all))<round(cut.NA*ncol(RPKM.all)),]
+x <- rowMeans(RPKM.all,na.rm=T)
+y <- RPKM.all[x >= quantile(x,prob=cut.bottom),] 
+sd <- apply(y,1,function(x) sd(x,na.rm=T))
+RPKM.sd <- y[sd >= quantile(sd,prob=cut.sd),] 
+RSEM.marker.genes <- RPKM.sd
+RSEM.marker.genes <- RSEM.marker.genes[,df2[order(df2$g.Bayes),]$sample]
+
+# cluster membership
+
+RSEM.marker.genes.scaled <- t(scale(t(RSEM.marker.genes)))
+
+library(ComplexHeatmap)
+library(pals)
+
+col = list(Subtypes  = c("S1" = kelly()[2], 
+                     "S2" = kelly()[3],
+                     "S3" = kelly()[4],
+                     "S4" = kelly()[5],
+                     "S5" = kelly()[6]
+                     ))
+
+s <- as.character(df2[order(df2$g.Bayes),]$g.Bayes)
+s[s=="1"] <- "S1"
+s[s=="2"] <- "S2"
+s[s=="3"] <- "S3"
+s[s=="4"] <- "S4"
+s[s=="5"] <- "S5"
+
+ha <- HeatmapAnnotation(Subtypes = s, col = col)
+
+set.seed(50)
+
+# row scaled data
+hm <- Heatmap(RSEM.marker.genes.scaled, 
+        name = "Row z-scores of mRNA expression", #title of legend
+        column_title = "Samples", row_title = "Genes",
+        col=colorRamp2(c(-1.5, 0, 1.5), c("blue", "white", "red")),
+        row_names_gp = gpar(fontsize = 11), # Text size for row names
+        cluster_columns = FALSE,
+        cluster_rows = TRUE,
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        top_annotation = ha
+        )
+
+hm
+
+pdf(file="./figures/Fig.1A_top5000_MVGs.pdf",width=8.5,height=5)
+
+hm
+
+dev.off()
+
+```
+
+###### Survival analysis
+
+```{r fig.height=15, fig.width=15, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+library(survival)
+library(survminer)
+library(readxl)
+
+survival.tcga <- read_excel("./input_data/TCGA_pancancer_survival_info.xlsx",sheet = 1, col_names = TRUE)
+
+survival.tcga <- survival.tcga[,-1]
+survival.tcga <- data.frame(survival.tcga)
+
+survival.tumor <- subset(survival.tcga,bcr_patient_barcode %in% colnames(TUMOR.GEXP.log2.mat))
+survival.tumor$gender <- factor(survival.tumor$gender)
+survival.tumor$race <- factor(survival.tumor$race)
+survival.tumor$tumor.stage <- ifelse(survival.tumor$ajcc_pathologic_tumor_stage %in% c("Stage I","Stage IA","Stage IB","Stage IC"), "Stage 1", 
+                                    ifelse(survival.tumor$ajcc_pathologic_tumor_stage %in% c("Stage II","Stage IIA","Stage IIB","Stage IIC"), "Stage 2",
+                                           ifelse(survival.tumor$ajcc_pathologic_tumor_stage %in% c("Stage III","Stage IIIA","Stage IIIB","Stage IIIC"), "Stage 3",  
+                                                   ifelse(survival.tumor$ajcc_pathologic_tumor_stage %in% c("Stage IV","Stage IVA","Stage IVB","Stage IVC"), "Stage 4", 
+                                                           ifelse(survival.tumor$ajcc_pathologic_tumor_stage == "Stage 0", "Stage 0",
+                                                                  ifelse(survival.tumor$ajcc_pathologic_tumor_stage =="I/II NOS",NA,NA
+                                                  )
+                                                                                            )))))
+
+
+survival.tumor$tumor.stage <- factor(survival.tumor$tumor.stage)
+
+all.patients <- c()
+for(i in 1:length(unique(g.Bayes))){
+  eval(parse(text=paste0("samples.g.Bayes.",i," <- intersect(names(g.Bayes)[g.Bayes==",i,"], colnames(TUMOR.GEXP.log2.mat))")))
+  
+  eval(parse(text=paste0("patients.g.Bayes.",i," <- as.character(sapply(samples.g.Bayes.",i,", function(x){ paste(strsplit(x,\"-\")[[1]][1:3],collapse=\"-\") }))")))
+  
+  eval(parse(text=paste0("patients.g.Bayes.",i," <- str_replace(patients.g.Bayes.",i,",\"",tumor.type,"\"",",\"TCGA\")")))
+  
+  all.patients <- c(all.patients, eval(parse(text=paste0("patients.g.Bayes.",i))))
+}
+  
+survival.tumor.subtype <- subset(survival.tumor,bcr_patient_barcode %in% all.patients)
+  
+commands <- c("survival.tumor.subtype$subtype <- ")
+for(i in 1:length(unique(g.Bayes))){
+
+  if(i != length(unique(g.Bayes))){
+      commands <- paste0(commands, "ifelse(survival.tumor.subtype$bcr_patient_barcode %in% patients.g.Bayes.",i,",\"g.Bayes.",i,"\",")
+  }
+  else{
+    commands <- paste0(commands, paste0("\"g.Bayes.",i,"\""))
+  }
+}
+commands <- paste0(commands, paste(rep(")",length(unique(g.Bayes))-1),collapse=""))
+
+eval(parse(text=commands))
+
+commands <- c("survival.tumor.subtype$subtype <- factor(survival.tumor.subtype$subtype,levels=c(")
+for(i in 1:length(unique(g.Bayes))){
+   if(i != length(unique(g.Bayes))){
+     commands <- paste0(commands, "\"g.Bayes.",i,"\",")
+   }
+   else{
+     commands <- paste0(commands, "\"g.Bayes.",i,"\"))")
+   }
+}
+eval(parse(text=commands))
+
+df <- survival.tumor.subtype
+
+df$subtype <- as.character(df$subtype)
+df$subtype[df$subtype=="g.Bayes.1"] <- "S1"
+df$subtype[df$subtype=="g.Bayes.2"] <- "S2"
+df$subtype[df$subtype=="g.Bayes.3"] <- "S3"
+df$subtype[df$subtype=="g.Bayes.4"] <- "S4"
+df$subtype[df$subtype=="g.Bayes.5"] <- "S5"
+df$subtype <- factor(df$subtype, levels=c("S1","S2","S3","S4","S5"))
+
+# Cox proportional hazard models 
+
+df2 <- subset(df, ! ajcc_pathologic_tumor_stage %in% c("[Discrepancy]","[Not Available]"))
+df3 <- df2[,c("subtype","age_at_initial_pathologic_diagnosis", "gender", "ajcc_pathologic_tumor_stage")]
+df2 <- df2[complete.cases(df3), ]
+
+df2$ajcc_pathologic_tumor_stage[df2$ajcc_pathologic_tumor_stage %in% c("Stage I","Stage IA","Stage IB")] <- "Stage I"
+df2$ajcc_pathologic_tumor_stage[df2$ajcc_pathologic_tumor_stage %in% c("Stage II","Stage IIA","Stage IIB")] <- "Stage II"
+df2$ajcc_pathologic_tumor_stage[df2$ajcc_pathologic_tumor_stage %in% c("Stage IIIA","Stage IIIB")] <- "Stage III"
+
+df2$ajcc_pathologic_tumor_stage <- factor(df2$ajcc_pathologic_tumor_stage, 
+                                          levels=c("Stage I", "Stage II","Stage III", "Stage IV"
+                                                   ))
+
+# Overall survival
+surv_object <- Surv(time = df2$OS.time, event =df2$OS)
+
+fit.coxph <- coxph(surv_object ~ subtype + age_at_initial_pathologic_diagnosis + gender + ajcc_pathologic_tumor_stage, data = df2)
+
+summary(fit.coxph)
+
+########################$
+# S5 vs others analysis 
+
+df2$S5_vs_Others <- ifelse(df2$subtype == "S5", "S5", "Others")
+
+# Overall survival
+surv_object <- Surv(time = df2$OS.time, event =df2$OS)
+
+fit.coxph <- coxph(surv_object ~ S5_vs_Others + age_at_initial_pathologic_diagnosis + gender + ajcc_pathologic_tumor_stage, data = df2)
+
+pdf(file="./figures/Fig.S4C_Cox.prop.hazard.model_OS_S5vsOthers.pdf",width=14,height=10)
+
+ggforest(fit.coxph, data = df2, fontsize = 1)
+
+dev.off()
+
+##################################################$
+# 2014 TCGA LUAD study expression subtype analysis
+
+chen <- read_excel("./input_data/onc2016303x2.xls",sheet = 1, col_names = TRUE)
+
+anno <- chen
+anno <- as.data.frame(anno)
+colnames(anno) <- anno[3,]
+
+anno <- anno[4:nrow(anno),]
+
+anno$Sample <- unlist(lapply(anno$`sample ID`, function(x) paste(strsplit(x,"-")[[1]][1:3],collapse="-")))
+
+anno <- subset(anno, `tumor/normal` == "tumor")
+anno <- anno[,c("sample ID","COCA-based","expression_subtype")]
+colnames(anno) <- c("Sample","COCA-based","expression_subtype")
+anno$Sample <- sapply(anno$Sample, function(x){
+            paste(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+df3 <- data.frame(Sample=names(g.Bayes),Subtype=g.Bayes)
+
+df3 <- inner_join(df3,anno,by=c("Sample"="Sample"))
+df3$Subtype <- as.character(df3$Subtype)
+
+# sort samples 
+
+df3$expression_subtype <- factor(df3$expression_subtype, levels=c("prox.-inflam","prox.-prolif.","TRU","NA"))
+colnames(df3)[colnames(df3)=="expression_subtype"] <- "previous_TCGA_expression_subtypes"
+
+df2 <- left_join(df2,df3[,c("Sample","previous_TCGA_expression_subtypes")],by=c("bcr_patient_barcode"="Sample"))
+
+df2$TRU_vs_Others <- ifelse(df2$previous_TCGA_expression_subtypes == "TRU", "TRU", 
+                            ifelse(df2$previous_TCGA_expression_subtypes %in% c("prox.-inflam","prox.-prolif."), "PI+PP", NA))
+
+# Overall survival
+surv_object <- Surv(time = df2$OS.time, event =df2$OS)
+
+fit.coxph <- coxph(surv_object ~ previous_TCGA_expression_subtypes + age_at_initial_pathologic_diagnosis + gender + ajcc_pathologic_tumor_stage, data = df2)
+
+summary(fit.coxph)
+
+# TRU vs. others
+
+fit.coxph <- coxph(surv_object ~ TRU_vs_Others + age_at_initial_pathologic_diagnosis + gender + ajcc_pathologic_tumor_stage, data = df2)
+
+summary(fit.coxph)
+
+# S5 vs. others 
+
+df4 <- subset(df2, previous_TCGA_expression_subtypes != "NA") # only samples in the original TCGA paper
+
+# Overall survival
+surv_object <- Surv(time = df4$OS.time, event =df4$OS)
+
+fit.coxph <- coxph(surv_object ~ S5_vs_Others + age_at_initial_pathologic_diagnosis + gender + ajcc_pathologic_tumor_stage, data = df4)
+
+summary(fit.coxph)
+
+```
+
+###### Subtype concordance with TCGA subtypes (BayesNMF vs. TCGA)
+
+```{r fig.height=10, fig.width=20, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+library(readxl)
+
+chen <- read_excel("./input_data/onc2016303x2.xls",sheet = 1, col_names = TRUE)
+
+anno <- chen
+anno <- as.data.frame(anno)
+colnames(anno) <- anno[3,]
+
+anno <- anno[4:nrow(anno),]
+
+anno$Sample <- unlist(lapply(anno$`sample ID`, function(x) paste(strsplit(x,"-")[[1]][1:3],collapse="-")))
+
+anno <- subset(anno, `tumor/normal` == "tumor")
+anno <- anno[,c("sample ID","COCA-based","expression_subtype")]
+colnames(anno) <- c("Sample","COCA-based","expression_subtype")
+anno$Sample <- sapply(anno$Sample, function(x){
+            paste(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+df2 <- data.frame(Sample=names(g.Bayes),Subtype=g.Bayes)
+
+df2 <- inner_join(df2,anno,by=c("Sample"="Sample"))
+df2$Subtype <- as.character(df2$Subtype)
+
+# sort samples 
+
+df2$expression_subtype <- factor(df2$expression_subtype, levels=c("prox.-inflam","prox.-prolif.","TRU","NA"))
+
+df2 <- df2[
+  with(df2, order(Subtype, expression_subtype)),
+]
+
+# Enrichment test (Fisher's exact test) for comparison with TCGA subtypes
+
+tmp <- subset(df2, expression_subtype != "NA")
+
+fisher.test(matrix(c(
+nrow(subset(tmp,Subtype==3 & expression_subtype=="prox.-inflam")),
+nrow(subset(tmp,Subtype==3 & expression_subtype!="prox.-inflam")),
+nrow(subset(tmp,Subtype!=3 & expression_subtype=="prox.-inflam")),
+nrow(subset(tmp,Subtype!=3 & expression_subtype!="prox.-inflam"))
+)
+,nrow=2,ncol=2),alternative="greater")
+
+fisher.test(matrix(c(
+nrow(subset(tmp,Subtype==4 & expression_subtype=="prox.-prolif.")),
+nrow(subset(tmp,Subtype==4 & expression_subtype!="pprox.-prolif.")),
+nrow(subset(tmp,Subtype!=4 & expression_subtype=="prox.-prolif.")),
+nrow(subset(tmp,Subtype!=4 & expression_subtype!="prox.-prolif."))
+)
+,nrow=2,ncol=2),alternative="greater")
+
+temp <- fisher.test(matrix(c(
+nrow(subset(tmp,Subtype==5 & expression_subtype=="TRU")),
+nrow(subset(tmp,Subtype==5 & expression_subtype!="TRU")),
+nrow(subset(tmp,Subtype!=5 & expression_subtype=="TRU")),
+nrow(subset(tmp,Subtype!=5 & expression_subtype!="TRU"))
+)
+,nrow=2,ncol=2),alternative="greater")
+temp
+temp$p.value
+
+# Confusion matrix 
+
+system("mkdir -p ./figures/Fig.1B_Confusion_matrix")
+
+# TCGA-based
+library(cvms)
+
+tmp <- subset(df2, expression_subtype != "NA")
+
+conf_mat <- confusion_matrix(targets = tmp$Subtype,
+                             predictions = tmp$expression_subtype)
+
+pdf(file="./figures/Fig.1B_Confusion_matrix/Fig.1B_confusion.matrix_TCGA.pdf",width=8,height=8)
+
+plot_confusion_matrix(conf_mat$`Confusion Matrix`[[1]])
+
+dev.off()
+
+# barplots for confusion matrix 
+
+for(soi in c("TRU","prox.-prolif.","prox.-inflam")){
+  
+  df <- data.frame(Subtype=c("S1","S2","S3","S4","S5"),
+                   Prop=c(nrow(subset(tmp,tmp$expression_subtype==soi & Subtype==1)) / nrow(subset(tmp,tmp$expression_subtype==soi)),
+                         nrow(subset(tmp,tmp$expression_subtype==soi & Subtype==2)) / nrow(subset(tmp,tmp$expression_subtype==soi)),
+                         nrow(subset(tmp,tmp$expression_subtype==soi & Subtype==3)) / nrow(subset(tmp,tmp$expression_subtype==soi)),
+                         nrow(subset(tmp,tmp$expression_subtype==soi & Subtype==4)) / nrow(subset(tmp,tmp$expression_subtype==soi)),
+                         nrow(subset(tmp,tmp$expression_subtype==soi & Subtype==5)) / nrow(subset(tmp,tmp$expression_subtype==soi))),
+                   N=rep(nrow(subset(tmp,tmp$expression_subtype==soi)),5)
+                         )
+  df$Subtype <- factor(df$Subtype, levels=c("S1","S2","S3","S4","S5"))
+  df$Pct <- df$Prop*100
+  
+  # Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+  library(binom)
+  Lower <- c()
+  Upper <- c()
+  for(i in 1:nrow(df)){
+    
+    Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+    Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+    
+  }
+  df$Lower <- Lower
+  df$Upper <- Upper
+  
+  theme_set(theme_bw())
+  gg <- ggplot(df, aes(x=Subtype, y=Pct, fill=Subtype)) + 
+         geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+         geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+         ggtitle(paste0(soi," ~ our subtypes")) +
+         scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6])) +
+         theme_bw(base_size = 20) + 
+         theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+         theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "none")
+  
+  pdf(file=paste0("./figures/Fig.1B_Confusion_matrix/barplot_",soi,"_BayesNMFsubtypes.pdf"),width=5,height=5)
+  
+  print(gg)
+  
+  dev.off()
+
+}
+
+for(soi in c(1,2,3,4,5)){
+  
+  df <- data.frame(expression_subtype=c("TRU","prox.-prolif.","prox.-inflam"),
+                   Prop=c(nrow(subset(tmp,tmp$Subtype==soi & expression_subtype=="TRU")) / nrow(subset(tmp,tmp$Subtype==soi)),
+                         nrow(subset(tmp,tmp$Subtype==soi & expression_subtype=="prox.-prolif.")) / nrow(subset(tmp,tmp$Subtype==soi)),
+                         nrow(subset(tmp,tmp$Subtype==soi & expression_subtype=="prox.-inflam")) / nrow(subset(tmp,tmp$Subtype==soi))
+                         ),
+                   N=rep(nrow(subset(tmp,tmp$Subtype==soi)),3)
+                   )
+  df$expression_subtype <- factor(df$expression_subtype, levels=c("TRU","prox.-prolif.","prox.-inflam"))
+  df$Pct <- df$Prop*100
+  
+  # Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+  library(binom)
+  Lower <- c()
+  Upper <- c()
+  for(i in 1:nrow(df)){
+    
+    Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+    Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+    
+  }
+  df$Lower <- Lower
+  df$Upper <- Upper
+  
+  theme_set(theme_bw())
+  gg <- ggplot(df, aes(x=expression_subtype, y=Pct, fill=expression_subtype)) + 
+         geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+         geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+         ggtitle(paste0("S",soi," ~ TCGA subtypes")) +
+         scale_fill_manual(values=c("black","firebrick","green")) +
+         theme_bw(base_size = 20) + 
+         theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+         theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "none")
+  
+  pdf(file=paste0("./figures/Fig.1B_Confusion_matrix/barplot_S",soi,"_TCGAsubtypes.pdf"),width=5,height=5)
+  
+  print(gg)
+  
+  dev.off()
+
+}
+
+##########################################################$
+# Biology of the TCGA PI subtype split into S1/S2/S3
+##########################################################$
+
+library(GSVA)
+
+# GSVA enrichment scores
+
+gmt.file <- "./input_data/h.all.v6.1.symbols.gmt"
+
+pathways <- gmtPathways(gmt.file)
+
+set.seed(10)
+
+all_luad_gsva <- gsva(TUMOR.GEXP.log2.mat, pathways, method="gsva", mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+
+##############$
+# GSVA Heatmap
+##############$
+
+all_gsva.soi <- all_luad_gsva
+
+all_gsva.soi.scaled <- t(scale(t(all_gsva.soi))) 
+
+library(ComplexHeatmap)
+library(pals)
+
+subtypes <- ifelse(colnames(all_gsva.soi) %in% names(g.Bayes)[g.Bayes==1],"S1", 
+                 ifelse(colnames(all_gsva.soi) %in% names(g.Bayes)[g.Bayes==2],"S2", 
+                        ifelse(colnames(all_gsva.soi) %in% names(g.Bayes)[g.Bayes==3],"S3", 
+                              ifelse(colnames(all_gsva.soi) %in% names(g.Bayes)[g.Bayes==4],"S4", "S5"))))
+
+col = list(subtype = c(
+                     "S1" = kelly()[2],
+                     "S2" = kelly()[3],
+                     "S3" = kelly()[4],
+                     "S4" = kelly()[5],
+                     "S5" = kelly()[6]
+                     )
+           )
+ha <- HeatmapAnnotation(subtype = subtypes, col = col, show_legend = TRUE, which = c("column"))
+
+set.seed(5)
+
+hm <- Heatmap(all_gsva.soi.scaled, 
+              cluster_rows = TRUE,
+              cluster_columns = TRUE,
+              show_row_names = TRUE,
+              show_column_names = FALSE,
+              show_heatmap_legend = TRUE,
+              column_split = subtypes,
+              row_km = 5, # Split by k-means clustering
+              name = "Row z-scores of GSVA enrichment scores", #title of legend
+              column_title = "Samples", row_title = "Gene sets",
+              width = unit(350, "mm"),
+              row_names_gp = gpar(fontsize = 11), # Text size for row names
+              top_annotation = ha
+        )
+
+set.seed(5)
+r1 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`1`]
+set.seed(5)
+r2 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`2`]
+set.seed(5)
+r3 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`5`]
+set.seed(5)
+r4 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`3`]
+set.seed(5)
+r5 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`4`]
+
+row.sets.from.tcga.gsva <- c(r1,r2,r3,r4,r5)
+
+# GSVA enrichment scores (pathway)
+
+df3 <- subset(df2, expression_subtype == "prox.-inflam" & Subtype %in% c(1,2,3,4,5))
+expression <-TUMOR.GEXP.log2.mat[,df3$Sample]
+
+library(GSVA)
+
+# GSVA enrichment scores
+
+gmt.file <- "./input_data/h.all.v6.1.symbols.gmt"
+
+pathways <- gmtPathways(gmt.file)
+
+set.seed(10)
+
+PI_s1s2s3s4s5_gsva <- gsva(expression, pathways, method="gsva", mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+
+all_gsva.soi <- PI_s1s2s3s4s5_gsva[,subset(df2, expression_subtype == "prox.-inflam" & Subtype %in% c(1,2,3))$Sample]
+
+all_gsva.soi.scaled <- t(scale(t(all_gsva.soi))) 
+
+all_gsva.soi.scaled <- all_gsva.soi.scaled[row.sets.from.tcga.gsva,]
+
+library(ComplexHeatmap)
+library(pals)
+
+col = list(BayesNMF.subtypes = c("S1" = kelly()[2], 
+                     "S2" = kelly()[3],
+                     "S3" = kelly()[4],
+                     "S4" = kelly()[5],
+                     "S5" = kelly()[6]
+                     ),
+           TCGA.expression.subtypes = c("prox.-prolif." = "firebrick",
+                                        "prox.-inflam" = "green",
+                                        "TRU" = "black",
+                                        "NA" = "grey"
+                                        )
+           
+           )
+
+df3 <- subset(df2, expression_subtype == "prox.-inflam" & Subtype %in% c(1,2,3))
+s <- df3$Subtype
+s[s=="1"] <- "S1"
+s[s=="2"] <- "S2"
+s[s=="3"] <- "S3"
+s[s=="4"] <- "S4"
+s[s=="5"] <- "S5"
+
+ha <- HeatmapAnnotation(BayesNMF.subtypes = s,
+                        TCGA.expression.subtypes = df3$expression_subtype, col = col,
+                        show_legend = FALSE)
+
+set.seed(5)
+
+hm <- Heatmap(all_gsva.soi.scaled, 
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = FALSE,
+              show_heatmap_legend = FALSE,
+              name = "Row z-scores of GSVA enrichment scores", #title of legend
+              column_title = "Samples", row_title = "Gene sets",
+              width = unit(450, "mm"),
+              row_names_gp = gpar(fontsize = 15), # Text size for row names
+              top_annotation = ha
+        )
+
+pdf(file="./figures/Fig.S1E_PI_split.pdf",width=28,height=13)
+
+hm
+
+dev.off()
+
+#####################################$
+# Differential GSVA enrichment scores 
+
+samples.PI.s1 <- intersect(colnames(PI_s1s2s3s4s5_gsva), subset(df2,Subtype==1)$Sample)
+samples.PI.s2 <- intersect(colnames(PI_s1s2s3s4s5_gsva), subset(df2,Subtype==2)$Sample)
+samples.PI.s3 <- intersect(colnames(PI_s1s2s3s4s5_gsva), subset(df2,Subtype==3)$Sample)
+samples.PI.s4 <- intersect(colnames(PI_s1s2s3s4s5_gsva), subset(df2,Subtype==4)$Sample)
+samples.PI.s5 <- intersect(colnames(PI_s1s2s3s4s5_gsva), subset(df2,Subtype==5)$Sample)
+
+samples.PI <-  c(samples.PI.s1,samples.PI.s2,samples.PI.s3)
+
+# (1) S1-specific pathways
+
+sample.of.interest <- samples.PI.s1
+samples.control <- setdiff(samples.PI,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(PI_s1s2s3s4s5_gsva)){
+ 
+  pi.si <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% sample.of.interest]]
+  pi.sc <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(PI_s1s2s3s4s5_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S1 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S1 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# (2) S2-specific pathways
+
+sample.of.interest <- samples.PI.s2
+samples.control <- setdiff(samples.PI,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(PI_s1s2s3s4s5_gsva)){
+ 
+  pi.si <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% sample.of.interest]]
+  pi.sc <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(PI_s1s2s3s4s5_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S2 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S2 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# (3) S3-specific pathways
+
+sample.of.interest <- samples.PI.s3
+samples.control <- setdiff(samples.PI,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(PI_s1s2s3s4s5_gsva)){
+ 
+  pi.si <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% sample.of.interest]]
+  pi.sc <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(PI_s1s2s3s4s5_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S3 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S3 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# (4) S4-specific pathways
+
+sample.of.interest <- samples.PI.s4
+samples.control <- setdiff(samples.PI,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(PI_s1s2s3s4s5_gsva)){
+ 
+  pi.si <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% sample.of.interest]]
+  pi.sc <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(PI_s1s2s3s4s5_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S4 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S4 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# (5) S5-specific pathways
+
+sample.of.interest <- samples.PI.s5
+samples.control <- setdiff(samples.PI,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(PI_s1s2s3s4s5_gsva)){
+ 
+  pi.si <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% sample.of.interest]]
+  pi.sc <- PI_s1s2s3s4s5_gsva[set,colnames(PI_s1s2s3s4s5_gsva)[colnames(PI_s1s2s3s4s5_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(PI_s1s2s3s4s5_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S5 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S5 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+down.S1$subtype.up.down <- rep("Down-regulated in S1",nrow(down.S1))
+up.S2$subtype.up.down <- rep("Up-regulated in S2",nrow(up.S2))
+down.S2$subtype.up.down <- rep("Down-regulated in S2",nrow(down.S2))
+up.S3$subtype.up.down <- rep("Up-regulated in S3",nrow(up.S3))
+
+res <- rbind(down.S1,
+             up.S2,
+             down.S2,
+             up.S3
+             )
+
+res <- res[,c("subtype.up.down","set","qval","mean.diff")]
+res$set <- str_replace(res$set,"HALLMARK_","")
+
+write.xlsx(res,"./tables/Table.S3_PI_split_up_down_pathways.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+
+
+```
+
+###### Subtype concordance with Chen et al. 2017 expression subtypes (BayesNMF vs. Chen expression)
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+library(readxl)
+
+chen <- read_excel("./input_data/onc2016303x2.xls",sheet = 1, col_names = TRUE)
+
+anno <- chen
+anno <- as.data.frame(anno)
+colnames(anno) <- anno[3,]
+
+anno <- anno[4:nrow(anno),]
+
+anno$Sample <- unlist(lapply(anno$`sample ID`, function(x) paste(strsplit(x,"-")[[1]][1:3],collapse="-")))
+
+anno <- subset(anno, `tumor/normal` == "tumor")
+anno <- anno[,c("sample ID","COCA-based","RNA-seq.1","expression_subtype")]
+colnames(anno) <- c("Sample","COCA","COCA_expression_cluster","expression_subtype")
+anno$Sample <- sapply(anno$Sample, function(x){
+            paste(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+df2 <- data.frame(Sample=names(g.Bayes),Subtype=g.Bayes)
+
+df2 <- inner_join(df2,anno,by=c("Sample"="Sample"))
+df2$Subtype <- as.character(df2$Subtype)
+df2$Subtype[df2$Subtype=="1"] <- "S1"
+df2$Subtype[df2$Subtype=="2"] <- "S2"
+df2$Subtype[df2$Subtype=="3"] <- "S3"
+df2$Subtype[df2$Subtype=="4"] <- "S4"
+df2$Subtype[df2$Subtype=="5"] <- "S5"
+
+colnames(df2)[colnames(df2)=="expression_subtype"] <- "TCGA_subtype"
+
+df2 <- df2[
+  with(df2, order(Subtype, COCA, COCA_expression_cluster, TCGA_subtype)),
+]
+
+write.xlsx(df2,"./tables/Table.S2_Subtype_concordance_BayesNMF_COCA_TCGA.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+# Confusion matrix 
+
+# (1) Our subtypes vs. Chen-COCA-based 
+
+df2$COCA <- factor(df2$COCA, levels=c("AD.1","AD.2","AD.3","AD.4","AD.5a","AD.5b","SQ.1","SQ.2b"))
+df2$Subtype <- factor(df2$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+df2 <- df2[
+  with(df2, order(COCA, Subtype, TCGA_subtype)),
+]
+
+conf_mat <- confusion_matrix(targets = df2$Subtype,
+                             predictions = df2$COCA
+                             )
+
+pdf(file="./figures/Fig.S1A_confusion.matrix_BayesNMF_vs_COCA.pdf",width=10,height=10)
+
+plot_confusion_matrix(conf_mat$`Confusion Matrix`[[1]])
+
+dev.off()
+
+# (2) Chen-COCA-based  vs. Chen-expression-based 
+
+df2$COCA_expression_cluster <- factor(df2$COCA_expression_cluster, levels=c("1","2","3","4","5","6"))
+
+df2 <- df2[
+  with(df2, order(Subtype, COCA_expression_cluster, TCGA_subtype)),
+]
+
+conf_mat <- confusion_matrix(targets = df2$COCA,
+                             predictions = df2$COCA_expression_cluster)
+
+pdf(file="./figures/Fig.S1B_confusion.matrix_Chen_COCA_vs_Chen_expression_cluster.pdf",width=10,height=10)
+
+plot_confusion_matrix(conf_mat$`Confusion Matrix`[[1]])
+
+dev.off()
+
+# (3) Chen-COCA-based vs. TCGA expression subtypes
+
+df3 <- df2[df2$TCGA_subtype!="NA", ]
+
+conf_mat <- confusion_matrix(targets = df3$COCA_expression_cluster,
+                             predictions = df3$TCGA_subtype)
+
+pdf(file="./figures/Fig.S1C_confusion.matrix_Chen_expression_cluster_vs_TCGA.pdf",width=10,height=10)
+
+plot_confusion_matrix(conf_mat$`Confusion Matrix`[[1]])
+
+dev.off()
+
+# (4) Our subtypes vs. Chen-expression-based 
+
+conf_mat <- confusion_matrix(targets = df2$Subtype,
+                             predictions = df2$COCA_expression_cluster)
+
+pdf(file="./figures/Fig.1B_Confusion_matrix/Fig.1B_confusion.matrix_BayesNMF_vs_COCA-expression.pdf",width=10,height=10)
+
+plot_confusion_matrix(conf_mat$`Confusion Matrix`[[1]])
+
+dev.off()
+
+# barplots for confusion matrix 
+
+for(soi in c("1","2","3","4","5","6")){
+  
+  df <- data.frame(Subtype=c("S1","S2","S3","S4","S5"),
+                   Prop=c(nrow(subset(df2,df2$COCA_expression_cluster==soi & Subtype=="S1")) / nrow(subset(df2,df2$COCA_expression_cluster==soi)),
+                          nrow(subset(df2,df2$COCA_expression_cluster==soi & Subtype=="S2")) / nrow(subset(df2,df2$COCA_expression_cluster==soi)),
+                          nrow(subset(df2,df2$COCA_expression_cluster==soi & Subtype=="S3")) / nrow(subset(df2,df2$COCA_expression_cluster==soi)),
+                          nrow(subset(df2,df2$COCA_expression_cluster==soi & Subtype=="S4")) / nrow(subset(df2,df2$COCA_expression_cluster==soi)),
+                          nrow(subset(df2,df2$COCA_expression_cluster==soi & Subtype=="S5")) / nrow(subset(df2,df2$COCA_expression_cluster==soi))),
+                   N=rep(nrow(subset(df2,df2$COCA_expression_cluster==soi)),5)
+  )
+  df$Subtype <- factor(df$Subtype, levels=c("S1","S2","S3","S4","S5"))
+  df$Pct <- df$Prop*100
+  
+  # Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+  library(binom)
+  Lower <- c()
+  Upper <- c()
+  for(i in 1:nrow(df)){
+    
+    Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+    Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+    
+  }
+  df$Lower <- Lower
+  df$Upper <- Upper
+  
+  theme_set(theme_bw())
+  gg <- ggplot(df, aes(x=Subtype, y=Pct, fill=Subtype)) + 
+    geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+    geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+    ggtitle(paste0(soi," ~ our subtypes")) +
+    scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6])) +
+    theme_bw(base_size = 20) + 
+    theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "none")
+  
+  pdf(file=paste0("./figures/Fig.1B_Confusion_matrix/barplot_",soi,"_BayesNMFsubtypes.pdf"),width=5,height=5)
+  
+  print(gg)
+  
+  dev.off()
+  
+}
+
+for(soi in c("S1","S2","S3","S4","S5")){
+  
+  df <- data.frame(COCA_expression_cluster=c("1","2","3","4","5","6"),
+                   Prop=c(nrow(subset(df2,df2$Subtype==soi & COCA_expression_cluster=="1")) / nrow(subset(df2,df2$Subtype==soi)),
+                          nrow(subset(df2,df2$Subtype==soi & COCA_expression_cluster=="2")) / nrow(subset(df2,df2$Subtype==soi)),
+                          nrow(subset(df2,df2$Subtype==soi & COCA_expression_cluster=="3")) / nrow(subset(df2,df2$Subtype==soi)),
+                          nrow(subset(df2,df2$Subtype==soi & COCA_expression_cluster=="4")) / nrow(subset(df2,df2$Subtype==soi)),
+                          nrow(subset(df2,df2$Subtype==soi & COCA_expression_cluster=="5")) / nrow(subset(df2,df2$Subtype==soi)),
+                          nrow(subset(df2,df2$Subtype==soi & COCA_expression_cluster=="6")) / nrow(subset(df2,df2$Subtype==soi))
+                   ),
+                   N=rep(nrow(subset(df2,df2$Subtype==soi)),3)
+  )
+  df$COCA_expression_cluster <- factor(df$COCA_expression_cluster, levels=c("1","2","3","4","5","6"))
+  df$Pct <- df$Prop*100
+  
+  # Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+  library(binom)
+  Lower <- c()
+  Upper <- c()
+  for(i in 1:nrow(df)){
+    
+    Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+    Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+    
+  }
+  df$Lower <- Lower
+  df$Upper <- Upper
+  
+  theme_set(theme_bw())
+  gg <- ggplot(df, aes(x=COCA_expression_cluster, y=Pct, fill=COCA_expression_cluster)) + 
+    geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+    geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+    ggtitle(paste0(soi," ~ TCGA subtypes")) +
+    scale_fill_manual(values=kelly()[16:21]) +
+    theme_bw(base_size = 20) + 
+    theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "none")
+  
+  pdf(file=paste0("./figures/Fig.1B_Confusion_matrix/barplot_",soi,"_COCAExpressionClusters.pdf"),width=5,height=5)
+  
+  print(gg)
+  
+  dev.off()
+  
+}
+
+```
+
+
+###### Marker gene selection 
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# Retrieve df information  
+
+OUTPUT_TPM <- "./input_data/BayesNMF_output/"
+
+n.iter <- 50 ## # of iterations 
+
+tmpK <- rep(0,n.iter)
+tmpE <- rep(0,n.iter)
+for (i in 1:n.iter) {
+  load(file=paste(OUTPUT_TPM,paste("res.L1EU.Bayes",i,"RData",sep="."),sep=""))
+  lambda <- res.Bayes[[5]]
+  lambda <- unlist(lambda[length(lambda)])
+  lambda <- lambda-min(lambda)
+  cat(lambda,sum(lambda!=0),'\n')
+  tmpK[i] <- sum(lambda > 0)
+  tmpE[i] <- res.Bayes[[4]][length(res.Bayes[[4]])]
+}
+
+################ summary of BayesNMF runs
+#### df has all info for BayesNMF runs and please choose the run # with the lowest "evid" for given K (== runK)
+df <- data.frame(seq(1:n.iter),tmpK,unlist(tmpE))
+colnames(df) <- c("run","K","evid")
+df <- df[order(df$evid,decreasing=T),]
+
+run.K = min(subset(df,evid==min(subset(df,K==max(as.numeric(names(table(df$K))[table(df$K)==max(table(df$K))])))$evid))$run)
+
+load(file=paste(OUTPUT_TPM,paste("res.L1EU.Bayes",run.K,"RData",sep="."),sep=""))
+
+res <- res.Bayes
+W <- res[[1]]
+H <- res[[2]]
+W <- W[,colSums(W)!=0]
+H <- H[rowSums(H)!=0,]
+rownames(H) <- paste("G",seq(1:nrow(H)),sep="")
+H.norm <- apply(H,2,function(x) x/sum(x))
+g.Bayes <- apply(H.norm,2,function(x) which.max(x))
+
+# Save sample-subtype membership information ("H.norm")
+df <- as.data.frame(t(H.norm))
+colnames(df) <- c("S1","S2","S3","S4","S5")
+df$Samples <- rownames(df)
+
+df2 <- data.frame(Samples=names(g.Bayes),Subtypes=g.Bayes)
+
+df <- inner_join(df2, df, by=c("Samples"="Samples"))
+df <- df[order(df$Subtypes),]
+
+df$Subtypes[df$Subtypes==1] <- "S1"
+df$Subtypes[df$Subtypes==2] <- "S2"
+df$Subtypes[df$Subtypes==3] <- "S3"
+df$Subtypes[df$Subtypes==4] <- "S4"
+df$Subtypes[df$Subtypes==5] <- "S5"
+
+write.xlsx(df,"./tables/Table.S1_Sample_Subtype_membership_for_TCGA_LUAD.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+######### parameter setting
+EXTRA <- FALSE  ### no manual curarion for markers
+cut.gene <- 100 ### number of markers in each subtype is restricted by cut.gene
+cut.W <- 0.50 ### only consider genes with the normalized association to clusters >= 0.50
+cut.fold <- rep(0.50,length(unique(g.Bayes))) ### select markers with mean difference of log2(fold changes) >= 0.50
+cut.NA <- 0.1 ### remove genes with NA values across samples > 0.1 
+
+source("./src/get.marker_for_fold.ver2.WR.R")
+marker0.original <- marker0
+
+df <- data.frame(Subtype=c(rep("S1",100),rep("S2",100),rep("S3",100),rep("S4",100),rep("S5",100)),
+                 Marker.genes=marker0.original
+                 )
+df$Marker.genes <- as.character(df$Marker.genes)
+
+df2 <- data.frame(Marker.genes = c(names(sort(W.marker0[subset(df, Subtype=="S1")$Marker.genes,"G1"],decreasing = TRUE)),
+                                   names(sort(W.marker0[subset(df, Subtype=="S2")$Marker.genes,"G2"],decreasing = TRUE)),
+                                   names(sort(W.marker0[subset(df, Subtype=="S3")$Marker.genes,"G3"],decreasing = TRUE)),
+                                   names(sort(W.marker0[subset(df, Subtype=="S4")$Marker.genes,"G4"],decreasing = TRUE)),
+                                   names(sort(W.marker0[subset(df, Subtype=="S5")$Marker.genes,"G5"],decreasing = TRUE))
+                                   ),
+                  Marker.subtype.association = c( sort(W.marker0[subset(df, Subtype=="S1")$Marker.genes,"G1"],decreasing = TRUE),
+                                    sort(W.marker0[subset(df, Subtype=="S2")$Marker.genes,"G2"],decreasing = TRUE),
+                                    sort(W.marker0[subset(df, Subtype=="S3")$Marker.genes,"G3"],decreasing = TRUE),
+                                    sort(W.marker0[subset(df, Subtype=="S4")$Marker.genes,"G4"],decreasing = TRUE),
+                                    sort(W.marker0[subset(df, Subtype=="S5")$Marker.genes,"G5"],decreasing = TRUE)
+)
+                    )
+
+df3 <- inner_join(df2,df,by=c("Marker.genes"="Marker.genes"))
+df3 <- df3[,c("Subtype","Marker.genes","Marker.subtype.association")]
+
+# Save subtype marker gene informaiton 
+write.xlsx(df3,"./tables/Table.S10_Subtype_markers.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+```
+
+###### Supervised clustering using marker genes
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# automatically load g.Bayes 
+
+OUTPUT_ttype <- "./input_data/BayesNMF_output/"
+
+load(file=paste(OUTPUT_ttype,"g.Bayes.RData",sep=""))
+
+df2 <- data.frame(sample=names(g.Bayes), g.Bayes=g.Bayes)
+
+# (1) RSEM
+RSEM.marker.genes <- TUMOR.GEXP.log2.mat[marker0.original,]
+
+RSEM.marker.genes <- RSEM.marker.genes[,df2[order(df2$g.Bayes),]$sample]
+
+# cluster membership
+
+RSEM.marker.genes.scaled <- t(scale(t(RSEM.marker.genes)))
+
+library(ComplexHeatmap)
+library(pals)
+
+col = list(Subtypes  = c("S1" = kelly()[2], 
+                     "S2" = kelly()[3],
+                     "S3" = kelly()[4],
+                     "S4" = kelly()[5],
+                     "S5" = kelly()[6]
+                     ))
+s <- as.character(df2[order(df2$g.Bayes),]$g.Bayes)
+s[s=="1"] <- "S1"
+s[s=="2"] <- "S2"
+s[s=="3"] <- "S3"
+s[s=="4"] <- "S4"
+s[s=="5"] <- "S5"
+
+ha <- HeatmapAnnotation(Subtypes = s, col = col)
+
+set.seed(50)
+
+# row scaled data
+hm <- Heatmap(RSEM.marker.genes.scaled, 
+        name = "Row z-scores of mRNA expression", #title of legend
+        column_title = "Samples", row_title = "Genes",
+        col=colorRamp2(c(-1.5, 0, 1.5), c("blue", "white", "red")),
+        row_names_gp = gpar(fontsize = 11), # Text size for row names
+        cluster_columns = FALSE,
+        cluster_rows = TRUE,
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        top_annotation = ha
+        )
+
+pdf(file="./figures//Fig.1A_subtype.markers.pdf",width=8.5,height=5)
+
+hm
+
+dev.off()
+
+```
+
+###### GSVA analysis 
+
+```{r fig.height=15, fig.width=40, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+library(GSVA)
+
+# GSVA enrichment scores
+
+gmt.file <- "./input_data/h.all.v6.1.symbols.gmt"
+
+pathways <- gmtPathways(gmt.file)
+
+set.seed(10)
+
+all_luad_gsva <- gsva(TUMOR.GEXP.log2.mat, pathways, method="gsva", mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+
+##############$
+# GSVA Heatmap
+##############$
+
+all_gsva.soi <- all_luad_gsva
+
+all_gsva.soi.scaled <- t(scale(t(all_gsva.soi))) 
+
+library(ComplexHeatmap)
+library(pals)
+
+subtypes <- ifelse(colnames(all_gsva.soi) %in% names(g.Bayes)[g.Bayes==1],"S1", 
+                 ifelse(colnames(all_gsva.soi) %in% names(g.Bayes)[g.Bayes==2],"S2", 
+                        ifelse(colnames(all_gsva.soi) %in% names(g.Bayes)[g.Bayes==3],"S3", 
+                              ifelse(colnames(all_gsva.soi) %in% names(g.Bayes)[g.Bayes==4],"S4", "S5"))))
+
+col = list(subtype = c(
+                     "S1" = kelly()[2],
+                     "S2" = kelly()[3],
+                     "S3" = kelly()[4],
+                     "S4" = kelly()[5],
+                     "S5" = kelly()[6]
+                     )
+           )
+ha <- HeatmapAnnotation(subtype = subtypes, col = col, show_legend = TRUE, which = c("column"))
+
+set.seed(5)
+
+hm <- Heatmap(all_gsva.soi.scaled, 
+              cluster_rows = TRUE,
+              cluster_columns = TRUE,
+              show_row_names = TRUE,
+              show_column_names = FALSE,
+              show_heatmap_legend = TRUE,
+              column_split = subtypes,
+              row_km = 5, # Split by k-means clustering
+        name = "Row z-scores of GSVA enrichment scores", #title of legend
+        column_title = "Samples", row_title = "Gene sets",
+        width = unit(350, "mm"),
+        row_names_gp = gpar(fontsize = 11), # Text size for row names
+        top_annotation = ha
+        )
+
+set.seed(5)
+r1 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`1`]
+set.seed(5)
+r2 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`2`]
+set.seed(5)
+r3 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`5`]
+set.seed(5)
+r4 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`3`]
+set.seed(5)
+r5 <- rownames(all_gsva.soi.scaled)[row_order(hm)$`4`]
+
+row.sets.from.tcga.gsva <- c(r1,r2,r3,r4,r5)
+
+#
+
+col.samples <- c( colnames(all_gsva.soi.scaled)[column_order(hm)$`S1`],
+                  colnames(all_gsva.soi.scaled)[column_order(hm)$`S2`],
+                  colnames(all_gsva.soi.scaled)[column_order(hm)$`S3`],
+                  colnames(all_gsva.soi.scaled)[column_order(hm)$`S4`],
+                  colnames(all_gsva.soi.scaled)[column_order(hm)$`S5`] )
+
+subtypes <- ifelse(col.samples %in% names(g.Bayes)[g.Bayes==1],"S1", 
+                 ifelse(col.samples %in% names(g.Bayes)[g.Bayes==2],"S2", 
+                        ifelse(col.samples %in% names(g.Bayes)[g.Bayes==3],"S3", 
+                              ifelse(col.samples %in% names(g.Bayes)[g.Bayes==4],"S4", "S5"))))
+
+col = list(subtype = c(
+                     "S1" = kelly()[2],
+                     "S2" = kelly()[3],
+                     "S3" = kelly()[4],
+                     "S4" = kelly()[5],
+                     "S5" = kelly()[6]
+                     )
+           )
+ha <- HeatmapAnnotation(subtype = subtypes, col = col, show_legend = TRUE, which = c("column"))
+
+mat <- all_gsva.soi.scaled
+rownames(mat) <- sapply(rownames(mat), function(x){
+  str_replace(x,"HALLMARK_","")
+})
+
+row.sets.from.tcga.gsva.no.hallmark <- sapply(row.sets.from.tcga.gsva, function(x){
+  str_replace(x,"HALLMARK_","")
+})
+
+# Add the age, sex, stage, smoking status
+
+sample.order <- colnames(mat[row.sets.from.tcga.gsva.no.hallmark,col.samples])[column_order(hm)]
+
+clinical.cbio <- read.delim("./input_data/luad_tcga_clinical_data_cBio.tsv",sep="\t",header=TRUE, as.is=TRUE)
+
+clinical.cbio <- clinical.cbio[,c("Sample.ID","Diagnosis.Age","Sex","Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code","Patient.Smoking.History.Category")]
+
+colnames(clinical.cbio) <- c("Sample","Age","Sex","Tumor stages","Smoking history")
+
+clinical.cbio$Sample <- sapply(clinical.cbio$Sample, function(x){
+  paste(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+clinical.cbio <- subset(clinical.cbio, Sample %in% colnames(mat))
+clinical.cbio <- clinical.cbio %>% distinct
+clinical.cbio <- clinical.cbio[match(sample.order, clinical.cbio$Sample),]
+
+clinical.cbio$Sex[clinical.cbio$Sex=="MALE"] <- "Male"
+
+clinical.cbio$`Smoking history` <- ifelse(clinical.cbio$`Smoking history`==1, "Never-smoker", "Ever-smoker")
+clinical.cbio$`Smoking history` <- factor(clinical.cbio$`Smoking history`, levels=c("Ever-smoker","Never-smoker"))
+clinical.cbio$Age <- ifelse(clinical.cbio$Age > 65, ">65", "<=65")
+clinical.cbio$Age <- factor(clinical.cbio$Age, levels=c(">65", "<=65"))
+
+# "Patient.Smoking.History.Category"
+# Lifelong Non-smoker (less than 100 cigarettes smoked in Lifetime) = 1
+# Current smoker (includes daily smokers and non-daily smokers or occasional smokers) = 2
+# Current reformed smoker for > 15 years (greater than 15 years) = 3
+# Current reformed smoker for ≤15 years (less than or equal to 15 years) = 4
+# Current reformed smoker, duration not specified = 5
+
+ha <- HeatmapAnnotation(age = clinical.cbio$Age,
+                        gender = clinical.cbio$Sex,
+                        smoking.history = clinical.cbio$`Smoking history`,
+                        tumor.stage = clinical.cbio$`Tumor stages`,
+                        subtype = subtypes, 
+                        
+                        col = list(age = c(">65"="dodgerblue4","<=65"="deepskyblue"),
+                                   gender = c("Female"="darkolivegreen2","Male"="darkolivegreen4"),
+                                   smoking.history = c("Ever-smoker"="orange",
+                                                       "Never-smoker"="red3"
+                                                       ),
+                                   tumor.stage = c("Stage I"="khaki1",
+                                                   "Stage IA"="gold",
+                                                   "Stage IB"="gold2",
+                                                   "Stage II"="orange",
+                                                   "Stage IIA"="darkorange",
+                                                   "Stage IIB"="darkorange2",
+                                                   "Stage IIIA"="firebrick1",
+                                                   "Stage IIIB"="firebrick3",
+                                                   "Stage IV"="black"
+                                                   ),
+                                   subtype = c("S1" = kelly()[2],
+                                               "S2" = kelly()[3],
+                                               "S3" = kelly()[4],
+                                               "S4" = kelly()[5],
+                                               "S5" = kelly()[6]
+                                               )
+                                   ), 
+                        show_legend = TRUE, which = c("column"))
+
+hm <- Heatmap(mat[row.sets.from.tcga.gsva.no.hallmark,col.samples], 
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = FALSE,
+              show_heatmap_legend = TRUE,
+              name = "Row z-scores of GSVA enrichment scores", #title of legend
+              column_title = "Samples", row_title = "Gene sets",
+              width = unit(650, "mm"),
+              row_names_gp = gpar(fontsize = 15), # Text size for row names
+              top_annotation = ha
+        )
+
+pdf(file="./figures/Fig.1C_GSVA.heatmap.pdf",width=35,height=15)
+
+draw(hm, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
+
+dev.off()
+
+#####################################$
+# Differential GSVA enrichment scores 
+#####################################$
+
+df2 <- data.frame(sample=names(g.Bayes),Subtype=g.Bayes)
+
+samples.s1 <- intersect(colnames(all_luad_gsva), subset(df2,Subtype==1)$sample)
+samples.s2 <- intersect(colnames(all_luad_gsva), subset(df2,Subtype==2)$sample)
+samples.s3 <- intersect(colnames(all_luad_gsva), subset(df2,Subtype==3)$sample)
+samples.s4 <- intersect(colnames(all_luad_gsva), subset(df2,Subtype==4)$sample)
+samples.s5 <- intersect(colnames(all_luad_gsva), subset(df2,Subtype==5)$sample)
+
+samples.all <-  c(samples.s1,samples.s2,samples.s3,samples.s4,samples.s5)
+
+# (1) S1-specific pathways
+
+sample.of.interest <- samples.s1
+samples.control <- setdiff(samples.all,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(all_luad_gsva)){
+ 
+  pi.si <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% sample.of.interest]]
+  pi.sc <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(all_luad_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S1 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S1 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# (2) S2-specific pathways
+
+sample.of.interest <- samples.s2
+samples.control <- setdiff(samples.all,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(all_luad_gsva)){
+ 
+  pi.si <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% sample.of.interest]]
+  pi.sc <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(all_luad_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S2 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S2 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# (3) S3-specific pathways
+
+sample.of.interest <- samples.s3
+samples.control <- setdiff(samples.all,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(all_luad_gsva)){
+ 
+  pi.si <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% sample.of.interest]]
+  pi.sc <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(all_luad_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S3 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S3 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# (4) S4-specific pathways
+
+sample.of.interest <- samples.s4
+samples.control <- setdiff(samples.all,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(all_luad_gsva)){
+ 
+  pi.si <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% sample.of.interest]]
+  pi.sc <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(all_luad_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S4 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S4 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# (5) S5-specific pathways
+
+sample.of.interest <- samples.s5
+samples.control <- setdiff(samples.all,sample.of.interest)
+
+# Q-value calculation 
+Pvals <- c()
+Mean.diff <- c()
+for(set in rownames(all_luad_gsva)){
+ 
+  pi.si <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% sample.of.interest]]
+  pi.sc <- all_luad_gsva[set,colnames(all_luad_gsva)[colnames(all_luad_gsva) %in% samples.control]]
+  
+  df <- rbind( data.frame(group = rep("samples.of.interest",length(pi.si)),
+                          gsva.enrichment.scores = as.numeric(pi.si)),
+               data.frame(group = rep("others",length(pi.sc)),
+                          gsva.enrichment.scores = as.numeric(pi.sc)))
+  
+  Pvals <- c(Pvals, wilcox.test(gsva.enrichment.scores~group,data=df)$p.value)
+  Mean.diff <- c(Mean.diff, mean(subset(df,group=="samples.of.interest")$gsva.enrichment.scores) - mean(subset(df,group=="others")$gsva.enrichment.scores))
+  
+}
+Qvals <- p.adjust(Pvals,'fdr')
+df.qval <- data.frame(set=rownames(all_luad_gsva),qval=Qvals,mean.diff=Mean.diff)
+df1 <- subset(df.qval,qval<0.05)
+df2 <- subset(df.qval,qval>=0.05)
+df.qval <- rbind(df1[order(-df1$mean.diff),],df2[order(-df2$mean.diff),])
+
+up.S5 <- subset(df.qval, qval < 0.05 & mean.diff > 0.2)
+down.S5 <- subset(df.qval, qval < 0.05 & mean.diff < -0.2)
+
+# Save the result as supplementary table X
+
+down.S1$subtype.up.down <- rep("Down-regulated in S1",nrow(down.S1))
+up.S2$subtype.up.down <- rep("Up-regulated in S2",nrow(up.S2))
+down.S2$subtype.up.down <- rep("Down-regulated in S2",nrow(down.S2))
+up.S3$subtype.up.down <- rep("Up-regulated in S3",nrow(up.S3))
+up.S4$subtype.up.down <- rep("Up-regulated in S4",nrow(up.S4))
+down.S4$subtype.up.down <- rep("Down-regulated in S4",nrow(down.S4))
+up.S5$subtype.up.down <- rep("Up-regulated in S5",nrow(up.S5))
+down.S5$subtype.up.down <- rep("Down-regulated in S5",nrow(down.S5))
+
+res <- rbind(down.S1,
+             up.S2,
+             down.S2,
+             up.S3,
+             up.S4,
+             down.S4,
+             up.S5,
+             down.S5
+             )
+
+res <- res[,c("subtype.up.down","set","qval","mean.diff")]
+res$set <- str_replace(res$set,"HALLMARK_","")
+
+write.xlsx(res,"./tables/Table.S3_All_LUAD_subtype_up_down_pathways.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+
+```
+
+###### MET/CD274 expression across subtypes
+
+```{r fig.height=8, fig.width=10, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+goi <- "MET"
+mat <- TUMOR.GEXP.log2.mat[goi,names(g.Bayes)]
+
+luad_exp <- data.frame(Sample = names(g.Bayes), Expression = as.numeric(mat))
+df <- data.frame(Sample = names(g.Bayes),Subtype=g.Bayes)
+luad_exp <- inner_join(luad_exp,df,by="Sample")
+luad_exp$Subtype <- as.character(luad_exp$Subtype)
+
+luad_exp$Subtype[luad_exp$Subtype=="1"] <- "S1"
+luad_exp$Subtype[luad_exp$Subtype=="2"] <- "S2"
+luad_exp$Subtype[luad_exp$Subtype=="3"] <- "S3"
+luad_exp$Subtype[luad_exp$Subtype=="4"] <- "S4"
+luad_exp$Subtype[luad_exp$Subtype=="5"] <- "S5"
+
+luad_exp$Subtype <- factor(luad_exp$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+my_comparisons <- list( c("S1","S3"),
+                        c("S2","S3"), 
+                        c("S3","S4"),c("S3","S5")
+                        )
+
+stat.test <- luad_exp %>%
+                  wilcox_test(Expression ~ Subtype, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+p <- ggplot(luad_exp, aes(x = Subtype, y = Expression))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title=goi, x="Subtype", y="mRNA expression")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.04, size = 5)
+
+p
+
+pdf(file="./figures/Fig.S7C_MET_expression_by_expression_subtypes.pdf",width=9.5,height=8)
+
+p
+
+dev.off()
+
+#
+
+P <- list()
+for(goi in c("MET","CD274","PAK1","JAK2","PIK3CA","MCL1","KRAS","FAT1","PDE4D")){
+  
+  mat <- TUMOR.GEXP.log2.mat[goi,names(g.Bayes)]
+  
+  luad_exp <- data.frame(Sample = names(g.Bayes), Expression = as.numeric(mat))
+  df <- data.frame(Sample = names(g.Bayes),Subtype=g.Bayes)
+  luad_exp <- inner_join(luad_exp,df,by="Sample")
+  luad_exp$Subtype <- as.character(luad_exp$Subtype)
+  
+  luad_exp$Subtype[luad_exp$Subtype=="1"] <- "S1"
+  luad_exp$Subtype[luad_exp$Subtype=="2"] <- "S2"
+  luad_exp$Subtype[luad_exp$Subtype=="3"] <- "S3"
+  luad_exp$Subtype[luad_exp$Subtype=="4"] <- "S4"
+  luad_exp$Subtype[luad_exp$Subtype=="5"] <- "S5"
+  
+  luad_exp$Subtype <- factor(luad_exp$Subtype, levels=c("S1","S2","S3","S4","S5"))
+  
+  #
+  
+  TCGA.LUAD.cn <- read.delim("./input_data/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+  
+  mat2 <- as.matrix(TCGA.LUAD.cn[,colnames(TCGA.LUAD.cn)[! colnames(TCGA.LUAD.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+  rownames(mat2) <- TCGA.LUAD.cn$Gene.Symbol
+  remove(TCGA.LUAD.cn)
+  mat2 <- t(mat2)
+  
+  mat2[mat2 == 2] <- 1
+  mat2[mat2 == -2] <- -1
+  
+  mat2 <- as.data.frame(mat2)
+  
+  mat2$Sample <- sapply(rownames(mat2), function(x){
+    paste0(str_split(x,"\\.")[[1]][1:3],collapse="-")
+  })
+  
+  mat2 <- mat2[,c("Sample",goi)]
+  mat2 <- subset(mat2, Sample %in% names(g.Bayes))
+  
+  df <- data.frame(Sample = names(g.Bayes),Subtype=g.Bayes)
+  
+  # remove duplicates 
+  subset(mat2, Sample %in% mat2$Sample[duplicated(mat2$Sample)])
+  
+  mat2 <- mat2[rownames(mat2)[!rownames(mat2) %in% c("TCGA.50.5066.02A.11D.2085.01","TCGA.50.5946.02A.11D.2085.01")],]
+  
+  mat2 <- inner_join(df,mat2,by="Sample")
+  
+  mat2$Subtype[mat2$Subtype=="1"] <- "S1"
+  mat2$Subtype[mat2$Subtype=="2"] <- "S2"
+  mat2$Subtype[mat2$Subtype=="3"] <- "S3"
+  mat2$Subtype[mat2$Subtype=="4"] <- "S4"
+  mat2$Subtype[mat2$Subtype=="5"] <- "S5"
+  
+  eval(parse(text=paste0("mat2$",goi," <- ifelse(mat2$",goi,"==1, \"AMP\",
+                     ifelse(mat2$",goi,"==-1, \"DEL\", \"NONE\"))")))
+  
+  eval(parse(text=paste0("luad_exp$CN <- mat2$",goi)))
+  
+  #
+  
+  goi_stat <- luad_exp  %>%
+    wilcox_test(Expression ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+    add_significance() %>% add_xy_position(x = "Subtype")
+  set.seed(1)
+  
+  goi_stat$p.adj <- sprintf("%.2e", goi_stat$p.adj)
+  gg <- ggplot(luad_exp, aes(x = Subtype, y = Expression))+
+          geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+          geom_jitter(alpha = 0.9,aes(col=CN))+
+          scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+          scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+          theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+          labs(title= goi ,y="mRNA expression")+
+          stat_pvalue_manual(goi_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, step.increase = 0.03)
+  
+  if(goi == "KRAS"){
+    
+    gg <- ggplot(luad_exp, aes(x = Subtype, y = Expression))+
+          geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+          geom_jitter(alpha = 0.9,aes(col=CN))+
+          scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+          scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+          theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+          labs(title= goi ,y="mRNA expression")
+
+  }
+  
+  P <- c(P, list(gg))
+          
+}
+
+pdf(file="./figures/Fig.S7A_goi_expression_by_expression_subtypes_with_CN.pdf",width=20, height=20)
+
+do.call(gridExtra::grid.arrange, c(P, nrow=3, ncol=3))
+
+dev.off()
+
+# MET amplified tumors only analysis 
+
+goi <- "MET"
+mat <- TUMOR.GEXP.log2.mat[goi,names(g.Bayes)]
+
+luad_exp <- data.frame(Sample = names(g.Bayes), Expression = as.numeric(mat))
+df <- data.frame(Sample = names(g.Bayes),Subtype=g.Bayes)
+luad_exp <- inner_join(luad_exp,df,by="Sample")
+luad_exp$Subtype <- as.character(luad_exp$Subtype)
+
+luad_exp$Subtype[luad_exp$Subtype=="1"] <- "S1"
+luad_exp$Subtype[luad_exp$Subtype=="2"] <- "S2"
+luad_exp$Subtype[luad_exp$Subtype=="3"] <- "S3"
+luad_exp$Subtype[luad_exp$Subtype=="4"] <- "S4"
+luad_exp$Subtype[luad_exp$Subtype=="5"] <- "S5"
+
+luad_exp$Subtype <- factor(luad_exp$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+#
+
+TCGA.LUAD.cn <- read.delim("./input_data/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat2 <- as.matrix(TCGA.LUAD.cn[,colnames(TCGA.LUAD.cn)[! colnames(TCGA.LUAD.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat2) <- TCGA.LUAD.cn$Gene.Symbol
+remove(TCGA.LUAD.cn)
+mat2 <- t(mat2)
+
+mat2[mat2 == 2] <- 1
+mat2[mat2 == -2] <- -1
+
+mat2 <- as.data.frame(mat2)
+
+mat2$Sample <- sapply(rownames(mat2), function(x){
+  paste0(str_split(x,"\\.")[[1]][1:3],collapse="-")
+})
+
+mat2 <- mat2[,c("Sample",goi)]
+mat2 <- subset(mat2, Sample %in% names(g.Bayes))
+
+df <- data.frame(Sample = names(g.Bayes),Subtype=g.Bayes)
+
+# remove duplicates 
+subset(mat2, Sample %in% mat2$Sample[duplicated(mat2$Sample)])
+
+mat2 <- mat2[rownames(mat2)[!rownames(mat2) %in% c("TCGA.50.5066.02A.11D.2085.01","TCGA.50.5946.02A.11D.2085.01")],]
+
+mat2 <- inner_join(df,mat2,by="Sample")
+
+mat2$Subtype[mat2$Subtype=="1"] <- "S1"
+mat2$Subtype[mat2$Subtype=="2"] <- "S2"
+mat2$Subtype[mat2$Subtype=="3"] <- "S3"
+mat2$Subtype[mat2$Subtype=="4"] <- "S4"
+mat2$Subtype[mat2$Subtype=="5"] <- "S5"
+
+eval(parse(text=paste0("mat2$",goi," <- ifelse(mat2$",goi,"==1, \"AMP\",
+                   ifelse(mat2$",goi,"==-1, \"DEL\", \"NONE\"))")))
+
+eval(parse(text=paste0("luad_exp$CN <- mat2$",goi)))
+
+#
+
+luad_exp <- subset(luad_exp, CN == "AMP")
+
+goi_stat <- luad_exp  %>%
+  wilcox_test(Expression ~ Subtype, paired = FALSE, p.adjust.method = "fdr") %>%
+  add_significance() %>% add_xy_position(x = "Subtype")
+set.seed(1)
+
+goi_stat$p.adj <- sprintf("%.2e", goi_stat$p.adj)
+gg <- ggplot(luad_exp, aes(x = Subtype, y = Expression))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.9,aes(col=CN))+
+        scale_color_manual(values=c("#bc1b0d","#0a0fdd","#bbbbbb"))+
+        scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title= goi ,y="mRNA expression")+
+        stat_pvalue_manual(goi_stat, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, step.increase = 0.03)
+
+pdf(file="./figures/Fig.S7D_MET_mRNA_expression_by_expression_subtypes_with_MET_amplification_only.pdf",width=7, height=6)
+
+gg
+
+dev.off()
+
+#####################################$
+
+# (2) CD274
+
+mat <- TUMOR.GEXP.log2.mat["CD274",names(g.Bayes)]
+
+luad_exp <- data.frame(Sample = names(g.Bayes), Expression = as.numeric(mat))
+df <- data.frame(Sample = names(g.Bayes),Subtype=g.Bayes)
+luad_exp <- inner_join(luad_exp,df,by="Sample")
+luad_exp$Subtype <- as.character(luad_exp$Subtype)
+
+luad_exp$Subtype[luad_exp$Subtype=="1"] <- "S1"
+luad_exp$Subtype[luad_exp$Subtype=="2"] <- "S2"
+luad_exp$Subtype[luad_exp$Subtype=="3"] <- "S3"
+luad_exp$Subtype[luad_exp$Subtype=="4"] <- "S4"
+luad_exp$Subtype[luad_exp$Subtype=="5"] <- "S5"
+
+luad_exp$Subtype <- factor(luad_exp$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+my_comparisons <- list( c("S1","S3"),
+                        c("S2","S3"), 
+                        c("S3","S4"),c("S3","S5")
+                        )
+
+stat.test <- luad_exp %>%
+                  wilcox_test(Expression ~ Subtype, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+p <- ggplot(luad_exp, aes(x = Subtype, y = Expression))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="CD274", x="Subtype", y="mRNA expression")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.04, size = 5)
+
+p
+
+pdf(file="./figures/Fig.S7B_CD274_expression_by_expression_subtypes.pdf",width=9.5,height=8)
+
+p
+
+dev.off()
+
+```
+
+###### MET/CD274 copy number across subtypes 
+
+```{r fig.height=8, fig.width=10, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# TCGA LUAD copy number data
+gene.cn <- read.delim("./input_data/all_data_by_genes.txt",sep="\t",header=T,check.names=F,as.is=T) 
+
+gene.cn <- gene.cn[,colnames(gene.cn)[!colnames(gene.cn) %in% c("Locus ID", "Cytoband")]]
+colnames(gene.cn)[colnames(gene.cn)=="Gene Symbol"] <- "Gene"
+
+mat <- gene.cn[,colnames(gene.cn)[colnames(gene.cn) != "Gene"]]
+rownames(mat) <- gene.cn$Gene
+mat <- t(mat)
+
+rownames(mat) <- sapply(rownames(mat), function(x){
+  paste0(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+mat <- as.data.frame(mat)
+
+mat$Sample <- rownames(mat)
+
+df <- data.frame(Sample = names(g.Bayes),Subtype=g.Bayes)
+
+mat <- inner_join(df,mat,by="Sample")
+
+mat$Subtype[mat$Subtype=="1"] <- "S1"
+mat$Subtype[mat$Subtype=="2"] <- "S2"
+mat$Subtype[mat$Subtype=="3"] <- "S3"
+mat$Subtype[mat$Subtype=="4"] <- "S4"
+mat$Subtype[mat$Subtype=="5"] <- "S5"
+
+mat$Subtype <- factor(mat$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+my_comparisons <- list( c("S1","S3"),
+                        c("S2","S3"), 
+                        c("S3","S4"),c("S3","S5")
+                        )
+
+mat2 <- mat[,c("Sample","Subtype","MET")]
+
+stat.test <- mat2 %>%
+                  wilcox_test(MET ~ Subtype, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+stat.test$y.position <- stat.test$y.position - 3
+stat.test$y.position[stat.test$p.adj.signif %in% c("**","***","****")] <- c(1, 1.2, 1.4, 1.6)
+
+mat2$MET[mat2$MET>1.5] <- 1.5 # if y values are greater than 2, force them to be 2 for visual purpose
+
+p <- ggplot(mat2, aes(x = Subtype, y = MET))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="MET", x="Subtype", y="Log2(copy number)-1")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.001, size = 5)#+
+        #scale_y_continuous(limits = c(0,1.6))
+
+p
+
+pdf(file="./figures/Fig.S7C_MET_copynumber_by_expression_subtypes.pdf",width=9.5,height=8)
+
+p
+
+dev.off()
+
+mat2 <- mat[,c("Sample","Subtype","CD274")]
+
+stat.test <- mat2 %>%
+                  wilcox_test(CD274 ~ Subtype, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+stat.test$y.position <- stat.test$y.position - 6
+stat.test$y.position[stat.test$p.adj.signif=="***"] <- c(0.8, 1.1, 1.4)
+
+mat2$CD274[mat2$CD274>1.5] <- 1.5 # if y values are greater than 2, force them to be 2 for visual purpose
+
+p <- ggplot(mat2, aes(x = Subtype, y = CD274))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="CD274", x="Subtype", y="Log2(copy number)-1")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.0001, size = 5)#+
+        #scale_y_continuous(limits = c(0,1.5))
+
+p
+
+pdf(file="./figures/Fig.S7B_CD274_copynumber_by_expression_subtypes.pdf",width=9.5,height=8)
+
+p
+
+dev.off()
+
+```
+
+###### MET - cytolytic marker correlation
+
+```{r fig.height=7, fig.width=15}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+gene1 <- "MET"
+
+P <- list()
+  
+for(gene2 in c("GZMB","GZMA","PRF1")){
+  
+  df <- data.frame(Sample=names(g.Bayes), Subtype=as.numeric(g.Bayes))
+  df$Subtype[df$Subtype==1] <- "S1"
+  df$Subtype[df$Subtype==2] <- "S2"
+  df$Subtype[df$Subtype==3] <- "S3"
+  df$Subtype[df$Subtype==4] <- "S4"
+  df$Subtype[df$Subtype==5] <- "S5"
+  df <- subset(df, Subtype %in% c("S3","S4"))
+  
+  mat <- TUMOR.GEXP.log2.mat[c(gene1,gene2),]
+  res <- data.frame(t(mat))
+  colnames(res) <- c("Gene1","Gene2")
+  res$Sample <- rownames(res)
+  
+  res <- inner_join(df,res,by=c("Sample"="Sample"))
+  
+  gg <- ggplot(res,aes(x=Gene1, y=Gene2, color= Subtype))+
+    geom_point()+
+    geom_smooth(method = lm)+
+    scale_color_manual(values=c(kelly()[4],kelly()[5]))+
+    theme_bw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    labs(title="", x=gene1, y=gene2)+
+    xlab(paste0(gene1," gene expression")) +
+    ylab(paste0(gene2," gene expression")) +
+    stat_cor(method = "pearson",label.y.npc= "top", color= c(kelly()[4],kelly()[5]))+
+    facet_wrap(~res$Subtype,scales = "free")
+  
+  P <- c(P, list(gg))
+  
+}
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 2, ncol = 2))
+
+pdf(file="./figures/Fig.4C_corr_of_MET_cytolytic_markers_S3_vs_S4.pdf",width=15,height=7)
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 2, ncol = 2))
+
+dev.off()
+
+```
+
+###### Data prep for MutSig2CV and GISTIC
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# (1) Load the SNV + Indel file
+load("./input_data/maf.snp.LUAD.RData")
+load("./input_data/maf.indel.LUAD.RData")
+
+maf.snp <- maf.snp[,colnames(maf.indel)]
+maf.snp <- rbind(maf.snp, maf.indel)
+
+maf.snp$Tumor_Sample_Barcode <- unlist(lapply(maf.snp$Tumor_Sample_Barcode, function(x) paste(strsplit(x,"-")[[1]][1:3],collapse="-")))
+
+OUTPUT_ttype <- "./input_data/BayesNMF_output/"
+load(file=paste(OUTPUT_ttype,"g.Bayes.RData",sep=""))
+g.Bayes
+
+maf.snp$Patient <- unlist(lapply(maf.snp$Tumor_Sample_Barcode, function(x) paste(strsplit(x,"-")[[1]][1:3],collapse="-")))
+
+maf.snp.subtype.1 <- subset(maf.snp, Patient %in% names(g.Bayes)[g.Bayes==1])
+maf.snp.subtype.2 <- subset(maf.snp, Patient %in% names(g.Bayes)[g.Bayes==2])
+maf.snp.subtype.3 <- subset(maf.snp, Patient %in% names(g.Bayes)[g.Bayes==3])
+maf.snp.subtype.4 <- subset(maf.snp, Patient %in% names(g.Bayes)[g.Bayes==4])
+maf.snp.subtype.5 <- subset(maf.snp, Patient %in% names(g.Bayes)[g.Bayes==5])
+maf.snp.all <- subset(maf.snp, Patient %in% names(g.Bayes))
+
+system('mkdir -p ./tables/TCGA_LUAD_maf_files_by_subtypes')
+
+write.table(maf.snp.subtype.1,"./tables/TCGA_LUAD_maf_files_by_subtypes/LUAD.maf.snv.indel.subtype.1.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(maf.snp.subtype.2,"./tables/TCGA_LUAD_maf_files_by_subtypes/LUAD.maf.snv.indel.subtype.2.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(maf.snp.subtype.3,"./tables/TCGA_LUAD_maf_files_by_subtypes/LUAD.maf.snv.indel.subtype.3.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(maf.snp.subtype.4,"./tables/TCGA_LUAD_maf_files_by_subtypes/LUAD.maf.snv.indel.subtype.4.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(maf.snp.subtype.5,"./tables/TCGA_LUAD_maf_files_by_subtypes/LUAD.maf.snv.indel.subtype.5.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(maf.snp.all,"./tables/TCGA_LUAD_maf_files_by_subtypes/LUAD.maf.snv.indel.all.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+# (2) Seg files
+
+LUAD.seg <- read.delim("./input_data/LUAD.snp__genome_wide_snp_6__broad_mit_edu__Level_3__segmented_scna_minus_germline_cnv_hg19__seg.seg.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+LUAD.seg$Patient <- unlist(lapply(LUAD.seg$Sample, function(x) paste(strsplit(x,"-")[[1]][1:3],collapse="-")))
+
+LUAD.seg$TN <- unlist(lapply(LUAD.seg$Sample, function(x) paste(strsplit(x,"-")[[1]][4])))
+
+LUAD.seg <- subset(LUAD.seg, TN %in% c("01A","01B","02A")) # tumor only
+
+seg.subtype.1 <- subset(LUAD.seg, Patient %in% names(g.Bayes)[g.Bayes==1])[,c("Sample","Chromosome","Start","End","Num_Probes","Segment_Mean")]
+seg.subtype.2 <- subset(LUAD.seg, Patient %in% names(g.Bayes)[g.Bayes==2])[,c("Sample","Chromosome","Start","End","Num_Probes","Segment_Mean")]
+seg.subtype.3 <- subset(LUAD.seg, Patient %in% names(g.Bayes)[g.Bayes==3])[,c("Sample","Chromosome","Start","End","Num_Probes","Segment_Mean")]
+seg.subtype.4 <- subset(LUAD.seg, Patient %in% names(g.Bayes)[g.Bayes==4])[,c("Sample","Chromosome","Start","End","Num_Probes","Segment_Mean")]
+seg.subtype.5 <- subset(LUAD.seg, Patient %in% names(g.Bayes)[g.Bayes==5])[,c("Sample","Chromosome","Start","End","Num_Probes","Segment_Mean")]
+
+seg.all <- subset(LUAD.seg, Patient %in% names(g.Bayes))[,c("Sample","Chromosome","Start","End","Num_Probes","Segment_Mean")]
+
+system('mkdir -p ./tables/TCGA_LUAD_seg_files_by_subtypes')
+
+write.table(seg.subtype.1,"./tables/TCGA_LUAD_seg_files_by_subtypes/LUAD.seg.subtype.1.seg",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(seg.subtype.2,"./tables/TCGA_LUAD_seg_files_by_subtypes/LUAD.seg.subtype.2.seg",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(seg.subtype.3,"./tables/TCGA_LUAD_seg_files_by_subtypes/LUAD.seg.subtype.3.seg",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(seg.subtype.4,"./tables/TCGA_LUAD_seg_files_by_subtypes/LUAD.seg.subtype.4.seg",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(seg.subtype.5,"./tables/TCGA_LUAD_seg_files_by_subtypes/LUAD.seg.subtype.5.seg",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(seg.all,"./tables/TCGA_LUAD_seg_files_by_subtypes/LUAD.seg.all.seg",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+
+```
+
+###### Co-mutation plots
+
+```{r fig.height=15, fig.width=15}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+library(maftools)
+
+s.order <- c(names(g.Bayes)[g.Bayes==1],
+             names(g.Bayes)[g.Bayes==2],
+             names(g.Bayes)[g.Bayes==3],
+             names(g.Bayes)[g.Bayes==4],
+             names(g.Bayes)[g.Bayes==5]
+             )
+
+# subtype annotation 
+
+subtype.anno <- data.frame(Tumor_Sample_Barcode = names(g.Bayes),
+                   Subtypes = ifelse(names(g.Bayes) %in% names(g.Bayes)[g.Bayes==1], "S1",
+                                     ifelse(names(g.Bayes) %in% names(g.Bayes)[g.Bayes==2], "S2",
+                                     ifelse(names(g.Bayes) %in% names(g.Bayes)[g.Bayes==3], "S3",
+                                            ifelse(names(g.Bayes) %in% names(g.Bayes)[g.Bayes==4], "S4", "S5"
+                                     )))
+                   
+                   ))
+
+subtype.anno$Subtypes <- factor(subtype.anno$Subtypes, levels=c("S1","S2","S3","S4","S5"))
+
+# Add the age, sex, stage, smoking status
+
+clinical.cbio <- read.delim("./input_data/luad_tcga_clinical_data_cBio.tsv",sep="\t",header=TRUE, as.is=TRUE)
+
+clinical.cbio <- clinical.cbio[,c("Sample.ID","Diagnosis.Age","Sex","Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code","Patient.Smoking.History.Category")]
+
+colnames(clinical.cbio) <- c("Sample","Age","Sex","Tumor stages","Smoking history")
+
+clinical.cbio$Sample <- sapply(clinical.cbio$Sample, function(x){
+  paste(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+clinical.cbio <- subset(clinical.cbio, Sample %in% colnames(TUMOR.GEXP.log2.mat))
+clinical.cbio <- clinical.cbio %>% distinct
+clinical.cbio <- clinical.cbio[match(colnames(TUMOR.GEXP.log2.mat), clinical.cbio$Sample),]
+
+clinical.cbio$Sex[clinical.cbio$Sex=="MALE"] <- "Male"
+colnames(clinical.cbio)[colnames(clinical.cbio)=="Sex"] <- "Gender"
+
+clinical.cbio$`Smoking history` <- ifelse(clinical.cbio$`Smoking history`==1, "Never-smoker", "Ever-smoker")
+clinical.cbio$`Smoking history` <- factor(clinical.cbio$`Smoking history`, levels=c("Ever-smoker","Never-smoker"))
+colnames(clinical.cbio)[colnames(clinical.cbio)=="Smoking history"] <- "Smoking.history"
+clinical.cbio$Age <- ifelse(clinical.cbio$Age > 65, ">65", "<=65")
+clinical.cbio$Age <- factor(clinical.cbio$Age, levels=c(">65", "<=65"))
+colnames(clinical.cbio)[colnames(clinical.cbio)=="Tumor stages"] <- "Tumor.stages"
+
+# "Patient.Smoking.History.Category"
+# Lifelong Non-smoker (less than 100 cigarettes smoked in Lifetime) = 1
+# Current smoker (includes daily smokers and non-daily smokers or occasional smokers) = 2
+# Current reformed smoker for > 15 years (greater than 15 years) = 3
+# Current reformed smoker for ≤15 years (less than or equal to 15 years) = 4
+# Current reformed smoker, duration not specified = 5
+
+subtype.anno <- left_join(subtype.anno,clinical.cbio,by=c("Tumor_Sample_Barcode"="Sample"))
+
+write.table(subtype.anno,"./input_data/subtype.anno.tsv", sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+maf.snp2 <- subset(maf.snp, Tumor_Sample_Barcode %in% names(g.Bayes))
+maf.snp.S4 <- subset(maf.snp, Tumor_Sample_Barcode %in% names(g.Bayes)[g.Bayes==4])
+
+# Default non-synonymos variants
+vc_nonsyn = c("Frame_Shift_Del", "Frame_Shift_Ins", "Splice_Site", "Translation_Start_Site","Nonsense_Mutation", "Nonstop_Mutation", "In_Frame_Del","In_Frame_Ins", "Missense_Mutation")
+
+# Add silent to the list
+vc_nonsyn = c(vc_nonsyn, "Silent")
+
+maf.snp.maftools <- read.maf(maf=maf.snp2, clinicalData="./input_data/subtype.anno.tsv", vc_nonSyn = vc_nonsyn)
+
+maf.snp.S4.maftools <- read.maf(maf=maf.snp.S4, vc_nonSyn = vc_nonsyn)
+
+##################$
+
+sig_genes_all <- read.delim("./input_data/MutSig2CV/LUAD_all_from_Firehose/sig_genes.txt",header=T,sep='\t',as.is=T)
+sig_genes_all <- subset(sig_genes_all, q < 0.01)
+
+sig_genes_s1 <- read.delim("./input_data/MutSig2CV/LUAD_subtype_1/sig_genes.txt",header=T,sep='\t',as.is=T)
+sig_genes_s1 <- subset(sig_genes_s1, q < 0.01)
+
+sig_genes_s2 <- read.delim("./input_data/MutSig2CV/LUAD_subtype_2/sig_genes.txt",header=T,sep='\t',as.is=T)
+sig_genes_s2 <- subset(sig_genes_s2, q < 0.01)
+
+sig_genes_s3 <- read.delim("./input_data/MutSig2CV/LUAD_subtype_3/sig_genes.txt",header=T,sep='\t',as.is=T)
+sig_genes_s3 <- subset(sig_genes_s3, q < 0.01)
+
+sig_genes_s4 <- read.delim("./input_data/MutSig2CV/LUAD_subtype_4/sig_genes.txt",header=T,sep='\t',as.is=T)
+sig_genes_s4 <- subset(sig_genes_s4, q < 0.01)
+
+sig_genes_s5 <- read.delim("./input_data/MutSig2CV/LUAD_subtype_5/sig_genes.txt",header=T,sep='\t',as.is=T)
+sig_genes_s5 <- subset(sig_genes_s5, q < 0.01)
+
+sig_genes_all_subtypes <- unique(c(sig_genes_s1$gene,sig_genes_s2$gene,sig_genes_s3$gene,sig_genes_s4$gene,sig_genes_s5$gene))
+
+goi <- c(
+  
+  sig_genes_all$gene, # in TCGA
+  setdiff(sig_genes_s4$gene, sig_genes_all$gene), # only in S4
+  setdiff(sig_genes_s5$gene, sig_genes_all$gene) # only in S5
+  
+)
+
+col = c("darkorange2","dodgerblue4","firebrick2","darkturquoise","darkorange2",
+        "yellow1","purple3","yellow1","darkgreen","forestgreen"
+)
+names(col) = c('Frame_Shift_Del','Missense_Mutation', 'Nonsense_Mutation', 'Multi_Hit', 'Frame_Shift_Ins',
+               'In_Frame_Ins', 'Splice_Site', 'In_Frame_Del','Nonstop_Mutation',"Silent")
+
+subtype.col <- c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6])
+names(subtype.col) <- c("S1","S2","S3","S4","S5")
+subtype.col = list(Subtypes = subtype.col)
+
+anno.col = list(Subtypes = c("S1" = kelly()[2],
+                           "S2" = kelly()[3],
+                           "S3" = kelly()[4],
+                           "S4" = kelly()[5],
+                           "S5" = kelly()[6]
+                           ),
+                Age = c(">65"="dodgerblue4","<=65"="deepskyblue"),
+                Gender = c("Female"="darkolivegreen2","Male"="darkolivegreen4"),
+                Tumor.stages = c("Stage I"="khaki1",
+                               "Stage IA"="gold",
+                               "Stage IB"="gold2",
+                               "Stage II"="orange",
+                               "Stage IIA"="darkorange",
+                               "Stage IIB"="darkorange2",
+                               "Stage IIIA"="firebrick1",
+                               "Stage IIIB"="firebrick3",
+                               "Stage IV"="black"
+                               ),
+                Smoking.history = c("Ever-smoker"="orange",
+                                   "Never-smoker"="red3"
+                                   )
+               )
+
+pdf(file="./figures/Fig.1D_CoMutPlot_main.pdf",width=14,height=10)
+
+op <- oncoplot(maf = maf.snp.maftools, top = 10, fontSize = 1,
+               genes = goi,
+               showTumorSampleBarcodes=FALSE,
+               sortByAnnotation = TRUE,
+               groupAnnotationBySize = FALSE,
+               removeNonMutated = FALSE,
+               drawRowBar = FALSE, # logical plots barplot for each gene. Default TRUE.
+               colors = col,
+               clinicalFeatures=c("Subtypes","Age","Gender","Tumor.stages","Smoking.history"),
+               annotationColor=anno.col,
+               bgCol="gray92",
+               keepGeneOrder=TRUE,
+               gene_mar = 7,
+               legendFontSize = 1.5,
+               annotationFontSize = 1.5
+               )
+
+dev.off()
+
+# Additional co-mutation meta information 
+
+mat <- c()
+
+for(s in c("S1","S2","S3","S4","S5")){
+  
+  maf.snp2.subtype.x <- subset(maf.snp2, Tumor_Sample_Barcode %in% subset(subtype.anno, Subtypes == s)$Tumor_Sample_Barcode)
+
+  temp <- c()
+  for(g in goi){
+    
+    temp <- c(temp, length(unique(subset(maf.snp2.subtype.x, Hugo_Symbol == g)$Tumor_Sample_Barcode)) / length(unique(maf.snp2.subtype.x$Tumor_Sample_Barcode)) ) # proportion of mutated genes in each subtype 
+    
+  }
+  
+  mat <- cbind(mat, temp)
+  
+}
+
+colnames(mat) <- c("S1","S2","S3","S4","S5")
+rownames(mat) <- goi
+
+# add the proportion of mutated genes in all samples
+temp <- c()
+for(g in goi){
+  
+  temp <- c(temp, length(unique(subset(maf.snp2, Hugo_Symbol == g)$Tumor_Sample_Barcode)) / length(unique(maf.snp2$Tumor_Sample_Barcode)) ) # proportion of mutated genes in each subtype 
+  
+}
+
+mat <- cbind(mat, temp)
+colnames(mat) <- c("S1","S2","S3","S4","S5","All")
+
+mat <- round(mat,2)
+mat <- 100*mat
+
+col_fun = colorRamp2(c(0, 100), c("white", "red"))
+
+hm <- Heatmap(mat, name = "mat", 
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        show_heatmap_legend = TRUE,
+        row_names_gp = gpar(fontface = "italic", fontface = "bold", fontsize = 15),
+        column_names_gp = gpar(fontface = "bold", fontsize = 20),
+        column_names_rot = 45,
+        col = col_fun,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+            grid.text(sprintf("%.0f", mat[i, j]), x, y, gp = gpar(fontsize = 15))},
+        heatmap_legend_param = list(
+            title = " Proportion of \n mutated samples \n in each subtype (%)", at = c(0, 50, 100),
+            title_gp = gpar(fontsize = 12, fontface = "plain"),
+            labels_gp = gpar(col = "black", fontsize = 10)
+        ) 
+) 
+
+hm
+
+pdf(file="./figures/Fig.1D_mut.prop.heatmap.pdf",width=6,height=10)
+
+hm
+
+dev.off()
+
+```
+
+###### Thorsson et al., 2018; "The immune landscape of cancer" TCGA analysis
+
+```{r fig.height=45, fig.width=35, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+TCGA.immune.anno <- read_excel("./input_data/TableS1_The_Immune_Landscape_of_Cancer.xlsx",sheet = 1, col_names = TRUE)
+
+TCGA.immune.anno <- subset(TCGA.immune.anno, `TCGA Study` == "LUAD")
+
+TCGA.immune.anno <- TCGA.immune.anno[,colnames(TCGA.immune.anno)[! colnames(TCGA.immune.anno) %in% c("Neutrophils...60","Eosinophils...61")]]
+
+colnames(TCGA.immune.anno)[colnames(TCGA.immune.anno)=="Neutrophils...48"] <- "Neutrophils"
+colnames(TCGA.immune.anno)[colnames(TCGA.immune.anno)=="Eosinophils...41"] <- "Eosinophils"
+
+# BayesNMF LUAD expression subtypes
+OUTPUT_ttype <- "./input_data/BayesNMF_output/"
+load(file=paste(OUTPUT_ttype,"g.Bayes.RData",sep=""))
+  
+df <- data.frame(g.Bayes)
+df$sample <- rownames(df)
+Bayes.subtypes <- df
+
+TCGA.immune.anno <- inner_join(Bayes.subtypes,TCGA.immune.anno,by=c("sample"="TCGA Participant Barcode"))
+
+tmp <- TCGA.immune.anno[,6:23]
+tmp <- as.data.frame(sapply(tmp, as.numeric))
+rownames(tmp) <- TCGA.immune.anno$sample
+
+tmp2 <- cbind(TCGA.immune.anno$g.Bayes,tmp)
+colnames(tmp2)[colnames(tmp2)=="TCGA.immune.anno$g.Bayes"] <- "Subtype"
+
+tmp2$Subtype[tmp2$Subtype=="1"] <- "S1"
+tmp2$Subtype[tmp2$Subtype=="2"] <- "S2"
+tmp2$Subtype[tmp2$Subtype=="3"] <- "S3"
+tmp2$Subtype[tmp2$Subtype=="4"] <- "S4"
+tmp2$Subtype[tmp2$Subtype=="5"] <- "S5"
+
+tmp2$Subtype <- factor(tmp2$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+
+########################################$
+# (1) Genmoics features across subtypes 
+
+my_comparisons <- list( c("S1","S2"), c("S1","S3"), c("S1","S4"), c("S1","S5"),
+                        c("S2","S3"), c("S2","S4"), c("S2","S5"),
+                        c("S3","S4"),c("S3","S5"),
+                        c("S4","S5")
+                        )
+
+genomic.features.of.interest <- c("SNV Neoantigens","Indel Neoantigens","Silent Mutation Rate","Nonsilent Mutation Rate","Number of Segments","Fraction Altered","Aneuploidy Score","Homologous Recombination Defects","Stromal Fraction","Intratumor Heterogeneity")
+
+RES <- c()
+for(c in genomic.features.of.interest){
+  
+  eval(parse(text=paste0("stat.test <- tmp2 %>%
+        wilcox_test(`",c,"` ~ Subtype, comparisons = my_comparisons, paired = FALSE)")))
+  
+  stat.test <- stat.test %>% add_xy_position()
+  
+  RES <- rbind(RES, stat.test)
+  
+}
+
+RES$p.adj <- p.adjust(RES$p, method="fdr")
+RES <- RES[,colnames(RES)[colnames(RES)!="p.adj.signif"]]
+RES <- RES %>% add_significance() 
+RES$p.adj <- sprintf("%.2e", RES$p.adj)
+
+P <- list()
+for(c in genomic.features.of.interest){
+  
+  stat.test <- subset(RES,`.y.` == c)
+  
+  set.seed(1)
+  eval(parse(text=paste0("p <- ggplot(tmp2, aes(x = Subtype, y = `",c,"`))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),legend.position = \"none\")+
+        labs(title=c, x=\"Subtype\", y=\"Scores\")+
+        stat_pvalue_manual(stat.test, label = \"p.adj\", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.08, size = 5)")))
+  
+  P <- c(P, list(p))
+
+}
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 4, ncol = 3))
+
+pdf(file="./figures/Fig.S3_Thorsson_genomic_features_expression_subtypes.pdf",width=25,height=35)
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 4, ncol = 3))
+
+dev.off()
+
+#####################################################################$
+
+genomic.features.of.interest <- c("Proliferation","Lymphocyte Infiltration Signature Score")
+
+my_comparisons <- list( c("S1","S3"),
+                        c("S2","S3"), 
+                        c("S3","S4"),c("S3","S5")
+                        )
+
+RES <- c()
+for(c in genomic.features.of.interest){
+  
+  eval(parse(text=paste0("stat.test <- tmp2 %>%
+        wilcox_test(`",c,"` ~ Subtype, comparisons = my_comparisons, paired = FALSE)")))
+  
+  stat.test <- stat.test %>% add_xy_position()
+  
+  RES <- rbind(RES, stat.test)
+  
+}
+
+RES$p.adj <- p.adjust(RES$p, method="fdr")
+RES <- RES[,colnames(RES)[colnames(RES)!="p.adj.signif"]]
+RES <- RES %>% add_significance() 
+RES$p.adj <- sprintf("%.2e", RES$p.adj)
+
+P <- list()
+for(c in genomic.features.of.interest){
+  
+  stat.test <- subset(RES,`.y.` == c)
+  
+  set.seed(1)
+  eval(parse(text=paste0("p <- ggplot(tmp2, aes(x = Subtype, y = `",c,"`))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),legend.position = \"none\")+
+        labs(title=c, x=\"Subtype\", y=\"Scores\")+
+        stat_pvalue_manual(stat.test, label = \"p.adj\", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.08, size = 5)")))
+  
+  P <- c(P, list(p))
+
+}
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 1, ncol = 2))
+
+pdf(file="./figures/Fig.4D_Proliferation.scores_Lymphocyte.Infiltration.Signature.scores_expression_subtypes.pdf",width=14,height=7.5)
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 1, ncol = 2))
+
+dev.off()
+
+##########################################$
+
+immune.features <- c("Lymphocyte Infiltration Signature Score","TIL Regional Fraction","IFN-gamma Response","TGF-beta Response","Macrophage Regulation")
+
+cell.types <- c("T Cells CD8",    
+                "T Cells CD4 Memory Activated","T Cells CD4 Memory Resting",
+                "T Cells Regulatory Tregs",   
+                "T Cells Follicular Helper",  
+                "T Cells gamma delta",              
+                "Th1 Cells","Th2 Cells","Th17 Cells",
+                "B Cells Memory","B Cells Naive",    
+                "Plasma Cells",
+                "NK Cells Activated","NK Cells Resting", 
+                "Dendritic Cells",
+                "Dendritic Cells Activated","Dendritic Cells Resting",       
+                "Macrophages",
+                "Macrophages M0","Macrophages M1","Macrophages M2",  
+                "Monocytes",                              
+                "Neutrophils",  
+                "Mast Cells",
+                "Mast Cells Activated","Mast Cells Resting",                     
+                "Eosinophils"             
+                )
+
+tmp <- TCGA.immune.anno[,c("Fraction Altered","Aneuploidy Score",immune.features,cell.types)]
+tmp <- as.data.frame(sapply(tmp, as.numeric))
+
+tmp2 <- cbind(TCGA.immune.anno$g.Bayes,tmp)
+colnames(tmp2)[colnames(tmp2)=="TCGA.immune.anno$g.Bayes"] <- "Subtype"
+
+tmp2$Subtype[tmp2$Subtype=="1"] <- "S1"
+tmp2$Subtype[tmp2$Subtype=="2"] <- "S2"
+tmp2$Subtype[tmp2$Subtype=="3"] <- "S3"
+tmp2$Subtype[tmp2$Subtype=="4"] <- "S4"
+tmp2$Subtype[tmp2$Subtype=="5"] <- "S5"
+
+tmp2 <- tmp2[,colnames(tmp2)[!colnames(tmp2) %in% c("Fraction Altered","Aneuploidy Score")]]
+
+tmp2$Subtype <- factor(tmp2$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+my_comparisons <- list( c("S1","S2"), c("S1","S3"), c("S1","S4"), c("S1","S5"),
+                        c("S2","S3"), c("S2","S4"), c("S2","S5"),
+                        c("S3","S4"),c("S3","S5"),
+                        c("S4","S5")
+                        )
+
+RES <- c()
+for(c in c(immune.features,cell.types)){
+  
+  eval(parse(text=paste0("stat.test <- tmp2 %>%
+        wilcox_test(`",c,"` ~ Subtype, comparisons = my_comparisons, paired = FALSE)")))
+  
+  stat.test <- stat.test %>% add_xy_position()
+  
+  RES <- rbind(RES, stat.test)
+  
+}
+
+RES$p.adj <- p.adjust(RES$p, method="fdr")
+RES <- RES[,colnames(RES)[colnames(RES)!="p.adj.signif"]]
+RES <- RES %>% add_significance() 
+RES$p.adj <- sprintf("%.2e", RES$p.adj)
+
+P <- list()
+for(c in c(immune.features,cell.types)){
+  
+  stat.test <- subset(RES,`.y.` == c)
+  
+  set.seed(1)
+  eval(parse(text=paste0("p <- ggplot(tmp2, aes(x = Subtype, y = `",c,"`))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[2],kelly()[3],kelly()[4],kelly()[5],kelly()[6]))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),legend.position = \"none\")+
+        labs(title=c, x=\"Subtype\", y=\"Scores\")+
+        stat_pvalue_manual(stat.test, label = \"p.adj\", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.04, size = 5)")))
+  
+  P <- c(P, list(p))
+
+}
+
+pdf(file="./figures/Fig.S3B_Thorsson_immune.cell.type.fraction_expression_subtypes.pdf",width=35,height=50)
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 7, ncol = 5))
+
+dev.off()
+
+# Heatmap
+
+tmp <- TCGA.immune.anno[,c("Fraction Altered","Aneuploidy Score",immune.features,cell.types)]
+tmp <- as.data.frame(sapply(tmp, as.numeric))
+
+tmp2 <- cbind(TCGA.immune.anno$sample,TCGA.immune.anno$g.Bayes,tmp)
+colnames(tmp2)[colnames(tmp2)=="TCGA.immune.anno$g.Bayes"] <- "Subtype"
+colnames(tmp2)[colnames(tmp2)=="TCGA.immune.anno$sample"] <- "Sample"
+
+tmp2$Subtype[tmp2$Subtype=="1"] <- "S1"
+tmp2$Subtype[tmp2$Subtype=="2"] <- "S2"
+tmp2$Subtype[tmp2$Subtype=="3"] <- "S3"
+tmp2$Subtype[tmp2$Subtype=="4"] <- "S4"
+tmp2$Subtype[tmp2$Subtype=="5"] <- "S5"
+
+tmp2 <- tmp2[,colnames(tmp2)[!colnames(tmp2) %in% c("Fraction Altered","Aneuploidy Score")]]
+
+tmp2$Subtype <- factor(tmp2$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+df <- tmp2[,c("Sample","Subtype")]
+
+rownames(tmp2) <- tmp2$Sample
+tmp2 <- tmp2[,colnames(tmp2)[! colnames(tmp2) %in% c("Sample","Subtype")]]
+tmp2 <- tmp2[complete.cases(tmp2),]
+
+tmp2 <- t(tmp2)
+
+tmp2.scaled <- t(scale(t(tmp2)))
+
+df <- subset(df, Sample %in% colnames(tmp2.scaled))
+
+tmp2.scaled[tmp2.scaled > 2] <- 2
+tmp2.scaled[tmp2.scaled < -2] <- -2
+
+df <- df[match(colnames(tmp2.scaled), df$Sample),]
+
+ha = HeatmapAnnotation(Subtypes = df$Subtype,
+                       col = list(Subtypes = c("S1"=kelly()[2],"S2"=kelly()[3],"S3"=kelly()[4],"S4"=kelly()[5],"S5"=kelly()[6])),  
+                       annotation_name_gp= gpar(fontsize = 40,fontface = "bold"),
+                       annotation_legend_param = list(Subtypes = list(title = "Subtypes")))
+
+hm <- Heatmap(tmp2.scaled,
+                        cluster_rows = TRUE,
+                        cluster_columns = TRUE,
+                        show_row_names = TRUE,
+                        show_column_names = FALSE,
+                        show_row_dend = TRUE,
+                        show_column_dend = TRUE,
+                        show_heatmap_legend = TRUE,
+                        row_names_gp = gpar(fontsize = 40), # Text size for row names
+                        column_names_gp = gpar(fontsize = 40), # Text size for column names
+                        name = "Row z-scores",
+                        column_title = "", row_title = "",
+                        width = unit(2000, "mm"),
+                        column_title_gp = gpar(fontsize = 40, fontface = "bold"),
+                        row_title_gp = gpar(fontsize = 40, fontface = "bold"),
+                        rect_gp = gpar(col = "white", lwd = 2), # white border for the heatmap grids
+                        heatmap_legend_param = list(
+                                            title_gp = gpar(fontsize = 20),
+                                            labels_gp = gpar(fontsize = 20)),
+                        top_annotation = ha,
+                        column_split = df$Subtype,
+                        cluster_column_slices = FALSE # keep the order of subtypes S1-S5
+                  )
+
+draw(hm, heatmap_legend_side = "left", annotation_legend_side = "left")
+
+rows.order <- rownames(tmp2.scaled)[row_order(hm)]
+
+rows.order <- c("Macrophage Regulation","Lymphocyte Infiltration Signature Score","IFN-gamma Response",                    "TGF-beta Response", "TIL Regional Fraction",
+                
+                "Th1 Cells", "T Cells CD4 Memory Resting","Th17 Cells","Mast Cells Resting","Mast Cells","Dendritic Cells Activated", "Monocytes", "Dendritic Cells", "Dendritic Cells Resting", "Macrophages","Macrophages M2", "Macrophages M0","Neutrophils","Mast Cells Activated","NK Cells Resting","T Cells CD4 Memory Activated","Eosinophils","T Cells gamma delta","Th2 Cells","Macrophages M1","T Cells CD8", "B Cells Naive","Plasma Cells","T Cells Regulatory Tregs","NK Cells Activated","T Cells Follicular Helper","B Cells Memory")
+
+hm <- Heatmap(tmp2.scaled[rows.order,],
+                        cluster_rows = FALSE,
+                        cluster_columns = TRUE,
+                        show_row_names = TRUE,
+                        show_column_names = FALSE,
+                        show_row_dend = FALSE,
+                        show_column_dend = TRUE,
+                        show_heatmap_legend = TRUE,
+                        row_names_gp = gpar(fontsize = 40), # Text size for row names
+                        column_names_gp = gpar(fontsize = 40), # Text size for column names
+                        name = "Row z-scores",
+                        column_title = "", row_title = "",
+                        width = unit(2000, "mm"),
+                        column_title_gp = gpar(fontsize = 40, fontface = "bold"),
+                        row_title_gp = gpar(fontsize = 40, fontface = "bold"),
+                        rect_gp = gpar(col = "white", lwd = 2), # white border for the heatmap grids
+                        heatmap_legend_param = list(
+                                            title_gp = gpar(fontsize = 20),
+                                            labels_gp = gpar(fontsize = 20)),
+                        top_annotation = ha,
+                        column_split = df$Subtype,
+                        cluster_column_slices = FALSE # keep the order of subtypes S1-S5
+                  )
+
+pdf(file="./figures/Fig.S4A_Thorsson_immune.cell.type.fraction_expression_subtypes_heatmap.pdf",width=100,height=30)
+
+draw(hm, heatmap_legend_side = "left", annotation_legend_side = "left")
+
+dev.off()
+
+# M1 macrophages and Th2 cell analysis
+
+immune.features <- c("Lymphocyte Infiltration Signature Score","TIL Regional Fraction","IFN-gamma Response","TGF-beta Response","Macrophage Regulation")
+
+cell.types <- c("T Cells CD8",    
+                "T Cells CD4 Memory Activated","T Cells CD4 Memory Resting",
+                "T Cells Regulatory Tregs",   
+                "T Cells Follicular Helper",  
+                "T Cells gamma delta",              
+                "Th1 Cells","Th2 Cells","Th17 Cells",
+                "B Cells Memory","B Cells Naive",    
+                "Plasma Cells",
+                "NK Cells Activated","NK Cells Resting", 
+                "Dendritic Cells",
+                "Dendritic Cells Activated","Dendritic Cells Resting",       
+                "Macrophages",
+                "Macrophages M0","Macrophages M1","Macrophages M2",  
+                "Monocytes",                              
+                "Neutrophils",  
+                "Mast Cells",
+                "Mast Cells Activated","Mast Cells Resting",                     
+                "Eosinophils"             
+                )
+
+tmp <- TCGA.immune.anno[,c("Fraction Altered","Aneuploidy Score",immune.features,cell.types)]
+tmp <- as.data.frame(sapply(tmp, as.numeric))
+
+tmp2 <- cbind(TCGA.immune.anno$g.Bayes,tmp)
+colnames(tmp2)[colnames(tmp2)=="TCGA.immune.anno$g.Bayes"] <- "Subtype"
+
+tmp2$Subtype[tmp2$Subtype=="1"] <- "S1"
+tmp2$Subtype[tmp2$Subtype=="2"] <- "S2"
+tmp2$Subtype[tmp2$Subtype=="3"] <- "S3"
+tmp2$Subtype[tmp2$Subtype=="4"] <- "S4"
+tmp2$Subtype[tmp2$Subtype=="5"] <- "S5"
+
+tmp2 <- tmp2[,colnames(tmp2)[!colnames(tmp2) %in% c("Fraction Altered","Aneuploidy Score")]]
+
+tmp2$Subtype <- factor(tmp2$Subtype, levels=c("S1","S2","S3","S4","S5"))
+
+tmp3 <- tmp2
+tmp3$S3vsOthers <- ifelse(tmp3$Subtype == "S3", "S3", "Others")
+tmp3$S4vsOthers <- ifelse(tmp3$Subtype == "S4", "S4", "Others")
+
+pval1 <- c()
+pval2 <- c()
+for(x in colnames(tmp3)[!colnames(tmp3) %in% c("Subtype","S3vsOthers","S4vsOthers")]){
+  
+  pval1 <- c(pval1, wilcox.test(tmp3[,x] ~ tmp3$S3vsOthers)$p.value)
+  pval2 <- c(pval2, wilcox.test(tmp3[,x] ~ tmp3$S4vsOthers)$p.value)
+  
+}
+
+res <- data.frame(features=colnames(tmp3)[!colnames(tmp3) %in% c("Subtype","S3vsOthers","S4vsOthers")],
+                  qval.S3vsOthers=p.adjust(pval1,'fdr'),
+                  qval.S4vsOthers=p.adjust(pval2,'fdr')
+                  )
+
+```
+
+###### TCGA LUAD ethnicity info
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+clinical <- read.delim("./input_data/TCGA_LUAD_clinical.tsv",sep="\t",header=TRUE, as.is=TRUE)
+
+clinical <- clinical[,c("case_submitter_id","race")]
+
+clinical <- clinical %>% distinct()
+
+df <- data.frame(case_submitter_id=names(g.Bayes), subtype=paste0("S",as.numeric(g.Bayes)))
+
+df <- inner_join(df,clinical,by=c("case_submitter_id"="case_submitter_id"))
+
+write.table(df,"./tables/TCGA_LUAD_race_subtype_info.tsv",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+```
+

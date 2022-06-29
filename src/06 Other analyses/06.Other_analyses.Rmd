@@ -1,0 +1,558 @@
+---
+title: "Roh, Geffen, Cha et al. 06 Other analyses"
+output: html_notebook
+---
+
+#### Subtype robustness (Fig S1D)
+
+```{r}
+
+## Downsampling
+
+TUMOR.GEXP.log2.mat.original <- TUMOR.GEXP.log2.mat
+
+total.samples <- colnames(TUMOR.GEXP.log2.mat.original)
+total.n <- length(total.samples)
+
+set.seed(10)
+for(downsampling.size in c(500,480,460,440,420,400,380,360,340,320,300,280,260,240,220,200)){
+
+  for(i in 1:10){ # 10 random downsamplings
+  
+      print(downsampling.size) 
+      print(i)
+      
+      TUMOR.GEXP.log2.mat <- TUMOR.GEXP.log2.mat.original[,sample(1:total.n, size = downsampling.size, replace = FALSE)] 
+  
+      library(miceadds)
+      source("./src/main.expression_clustering_simple.WR.R")
+  
+      OUTPUT <- paste0("./input_data/BayesNMF_downsampling/BayesNMF_output_",downsampling.size,"_",i,"/")
+      OUTPUT2 <- OUTPUT
+      system(paste0("mkdir -p ",OUTPUT2))
+      
+      threshold.NA <- 0.1
+      cut.NA <- 0.1 ## remove genes with more than 10% NA or zero values
+      cut.bottom <- 0.1 ## filter out bottom 10% genes in terms of mean expression
+      cut.sd <- 0.75 ## include genes with top 25% in terms of SD
+      
+      color.axis="grey" # color of sample names from H martix plot
+      
+      ################################################
+      ####### expression data = RPKM.all = log2-normalized expression data (gene by sample)
+      ################################################
+      
+      RPKM.all <- TUMOR.GEXP.log2.mat
+      
+      # remove samples with all NAs
+      RPKM.all <- RPKM.all[, colSums(is.na(RPKM.all)) != nrow(RPKM.all)] 
+      
+      RPKM.all[RPKM.all < threshold.NA] <- NA ## RPKM.all[RPKM.all == 0] <- NA.. You may choose your own threshold to make low expression values NA
+      RPKM.all <- RPKM.all[rowSums(is.na(RPKM.all))<round(cut.NA*ncol(RPKM.all)),]
+      x <- rowMeans(RPKM.all,na.rm=T)
+      y <- RPKM.all[x >= quantile(x,prob=cut.bottom),] 
+      sd <- apply(y,1,function(x) sd(x,na.rm=T))
+      RPKM.sd <- y[sd >= quantile(sd,prob=cut.sd),] 
+      
+      ####### transform to fold-changed expression 
+      RPKM.fold <- t(apply(RPKM.sd,1,function(x) x-median(x,na.rm=T)))
+      
+      ####### compute the spearman correlations among samples with selected genes above
+      corr.all <- get.correlation.spearman(RPKM.fold)
+      rownames(corr.all) <- colnames(RPKM.fold)
+      colnames(corr.all) <- colnames(RPKM.fold)
+      pdf(file=paste(OUTPUT,"correlation.ordered_by_HC.pdf",sep=""),width=8,height= 8)
+      	plot.heatmap.3(corr.all,T,T,"Rank-correlation matrix")
+      dev.off()
+      save(corr.all,file=paste(OUTPUT,"corr.all.RData",sep=""))
+      
+      ################# sample selection
+      #max.K <- 10 ### NMF iterations with varyig K up to max.K
+      max.K <- 8 ### NMF iterations with varyig K up to max.K
+      pItem <- 0.8 ### re-sampling rate = 80% = randomly choose 80% samples in each NMF iteration
+      innerLinkage <- "average"
+      finalLinkage <- "ward.D"
+      n.base <- 500 ### # of basic NMF iterations for given K
+      
+      res.consensus <- get.consensus.mat(corr.all,max.K,pItem,innerLinkage,finalLinkage,n.base)
+      consensus.mat <- res.consensus[[1]]
+      consensus.norm <- res.consensus[[2]]
+      save(consensus.mat,file=paste(OUTPUT,"consensus.mat.RData",sep=""))
+      save(consensus.norm,file=paste(OUTPUT,"consensus.norm.RData",sep=""))
+      
+      x <- consensus.mat
+      pdf(file=paste(OUTPUT,"consensus.ordered_by_HC.pdf",sep=""),width=8,height= 8)
+      	plot.heatmap.3(x,T,T,"Consensus matrix by a hierarchical clustering")
+      dev.off()
+      
+      ############################################################
+      ################## NMF - sample discovery
+      ################## run Bayesian n.iter times
+      ############################################################
+      #n.iter <- 50 ## # of iterations 
+      n.iter <- 30 ## # of iterations 
+      for (i in 1:n.iter) {
+      	res.Bayes <- BayesNMF.L1EU(as.matrix(consensus.norm),200000,10,1.e-07,10,10,1.0)
+      	save(res.Bayes,file=paste(OUTPUT,paste("res.L1EU.Bayes",i,"RData",sep="."),sep=""))
+      }
+      
+      tmpK <- rep(0,n.iter)
+      tmpE <- rep(0,n.iter)
+      for (i in 1:n.iter) {
+      	load(file=paste(OUTPUT,paste("res.L1EU.Bayes",i,"RData",sep="."),sep=""))
+      	lambda <- res.Bayes[[5]]
+      	lambda <- unlist(lambda[length(lambda)])
+      	lambda <- lambda-min(lambda)
+      	cat(lambda,sum(lambda!=0),'\n')
+      	tmpK[i] <- sum(lambda > 0)
+      	tmpE[i] <- res.Bayes[[4]][length(res.Bayes[[4]])]
+      }
+      
+      ################################################
+      ################ summary of BayesNMF runs
+      #### df has all info for BayesNMF runs and please choose the run # with the lowest "evid" for given K (== runK)
+      ################################################
+      df <- data.frame(seq(1:n.iter),tmpK,unlist(tmpE))
+      colnames(df) <- c("run","K","evid")
+      df <- df[order(df$evid,decreasing=T),]
+      
+      x <- table(tmpK)
+      pdf(file=paste(OUTPUT,paste("BayesNMF.freq.pdf",sep="."),sep=""),width=4,height=5)
+      s1 <- 1.5
+      s2 <- 2.0
+      par(mfrow=c(1,1))
+      par(mar=c(5,5,2,1))
+              barplot(x,cex=s1,cex.axis=s1,cex.main=s1,cex.names=s1,cex.lab=s1,xlab="# of signatures",ylab="Freq.",main=paste(tumor.type,sep="."))
+      dev.off()
+      
+      #########################################
+      ################ please specify the run with the lowest "evid" values for given K  = run.K
+      #########################################
+      
+      run.K = min(subset(df,evid==min(subset(df,K==max(as.numeric(names(table(df$K))[table(df$K)==max(table(df$K))])))$evid))$run)
+      
+      load(file=paste(OUTPUT,paste("res.L1EU.Bayes",run.K,"RData",sep="."),sep=""))
+      res.clust <- get.consensus.clustering(res.Bayes,consensus.norm)
+      g.Bayes <- res.clust[[1]]
+      save(g.Bayes,file=paste0(OUTPUT,"g.Bayes.RData")) ### cluster membership is saved here. The membership is determined by the maximum association of H
+      
+      ordering <- order(g.Bayes,decreasing=F)
+      x <- corr.all
+      y <- seq(1:nrow(x))
+      rownames(x) <- y
+      colnames(x) <- y
+      pdf(file=paste(OUTPUT,"correlation.ordered.pdf",sep=""),width=8,height= 8)
+      	plot.heatmap.3(x[ordering,ordering],F,F,"Rank-correlation matrix")
+      dev.off()
+      x <- consensus.mat
+      rownames(x) <- y
+      colnames(x) <- y
+      pdf(file=paste(OUTPUT,"consensus.ordered.pdf",sep=""),width=8,height= 8)
+      	plot.heatmap.3(x[ordering,ordering],F,F,"Consensus matrix")
+      dev.off()
+      
+      ################## plotting H matrix
+      H <- res.Bayes[[2]]
+      H <- H[rowSums(H)!=0,]
+      K0 <- nrow(H)
+      rownames(H) <- paste("G",seq(1:K0),sep="")
+      H.norm <- apply(H,2,function(x) x/sum(x))
+      
+      res <- get.sample.association.heatmap(H,g.Bayes,1.0)
+      p1 <- res[[1]]
+      p2 <- res[[2]]
+      p3 <- res[[3]]
+      pdf(file=paste(OUTPUT,"H.ordered.pdf",sep=""),width=12,height=4)
+      	plot(p1)
+      dev.off()
+      pdf(file=paste(OUTPUT,"H.norm.ordered.pdf",sep=""),width=12,height=4)
+      	plot(p2)
+      dev.off() 
+       
+  }
+  
+}
+
+###### Downstream analyses
+
+# (1) The number of downsampling runs converging to each K vs. Downsampling size
+
+RES <- c()
+for(downsampling.size in c(500,480,460,440,420,400,380,360,340,320,300,280,260,240,220,200)){
+  K.freq <- c()
+  for(i in 1:10){ # 10 random downsamplings
+      load(paste0("./input_data/BayesNMF_downsampling/BayesNMF_output_",downsampling.size,"_",i,"/g.Bayes.RData"))
+      K <- length(unique(g.Bayes))
+      K.freq <- c(K.freq, K)
+  }
+  df <- data.frame(Downsampling.size=rep(downsampling.size,5),
+                   Freq=c(ifelse(length(as.numeric(table(K.freq)[names(table(K.freq))=="3"]))==0,0,as.numeric(table(K.freq)[names(table(K.freq))=="3"])),
+                          ifelse(length(as.numeric(table(K.freq)[names(table(K.freq))=="4"]))==0,0,as.numeric(table(K.freq)[names(table(K.freq))=="4"])),
+                          ifelse(length(as.numeric(table(K.freq)[names(table(K.freq))=="5"]))==0,0,as.numeric(table(K.freq)[names(table(K.freq))=="5"])),
+                          ifelse(length(as.numeric(table(K.freq)[names(table(K.freq))=="6"]))==0,0,as.numeric(table(K.freq)[names(table(K.freq))=="6"])),
+                          ifelse(length(as.numeric(table(K.freq)[names(table(K.freq))=="7"]))==0,0,as.numeric(table(K.freq)[names(table(K.freq))=="7"]))),
+                   K=c(3,4,5,6,7)
+  )
+  RES <- rbind(RES,df)
+}
+
+RES$K <- factor(RES$K)
+
+# stacked area chart
+theme_set(theme_bw())
+gg <- ggplot(RES, aes(x=Downsampling.size, y=Freq, fill=K)) + 
+          geom_area(alpha=0.6, size=1, colour="black") +
+          scale_fill_manual(values=c(kelly()[3],kelly()[5],kelly()[7],kelly()[6],kelly()[10]))+
+          scale_x_continuous(breaks = seq(200, 500, by = 20))+
+          scale_y_continuous(breaks = seq(0, 10, by = 1))+
+          theme_minimal()+ 
+           xlab("Downsampling size (Number of samples)") +
+           ylab("Number of downsampling runs converging to each K")
+
+pdf(file="./figures/Fig.S1D_subtype_robustness_by_downsampling.pdf",width=7,height=5)
+
+gg
+
+dev.off()
+
+##############$
+# K=4 vs. K=5
+
+downsampling.size <- 460
+i <- 4
+load(paste0("./input_data/BayesNMF_downsampling/BayesNMF_output_",downsampling.size,"_",i,"/g.Bayes.RData"))
+
+df <- data.frame(Sample=names(g.Bayes),
+                 Subtypes.K4=g.Bayes)
+
+i <- 2
+load(paste0("./input_data/BayesNMF_downsampling/BayesNMF_output_",downsampling.size,"_",i,"/g.Bayes.RData"))
+
+df2 <- data.frame(Sample=names(g.Bayes),
+                  Subtypes.K5=g.Bayes)
+
+df <- inner_join(df,df2,by=c("Sample"="Sample"))
+
+df <- as.data.frame(table(df$Subtypes.K4, df$Subtypes.K5))
+df$Var1 <- paste0("S",df$Var1)
+df$Var2 <- paste0("S",df$Var2)
+colnames(df) <- c("Subtypes (K=4)","Subtypes (K=5)","Freq")
+
+pdf(file="./figures/Fig.S1G_K4_vs_K5_subtype_concordance_ballplots.pdf",width=5,height=5)
+
+theme_set(theme_pubr())
+ggballoonplot(df,  color = "#0073C2FF", fill = "#0073C2FF")+
+  scale_fill_viridis_c(option = "C")
+
+dev.off()
+
+
+
+```
+#### TCGA LUAD subtypes ~ age, sex, stage, smoking status
+
+```{r}
+
+OUTPUT_ttype <- "./input_data/BayesNMF_output/"
+load(file=paste(OUTPUT_ttype,"g.Bayes.RData",sep=""))
+
+df <- data.frame(Sample=names(g.Bayes),
+                 Subtype=paste0("S",g.Bayes)
+                 )
+
+df <- inner_join(df, clinical.cbio, by=c("Sample"="Sample"))
+
+df <- df[order(df$Subtype),]
+
+write.xlsx(df,"./tables/Table.S4_TCGA_LUAD_clinical_info.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+library(RVAideMemoire)
+
+fisher.multcomp(table(df$Subtype, df$Age))
+table(df[,c("Subtype","Age")]) / rowSums(table(df[,c("Subtype","Age")]))
+
+fisher.multcomp(table(df$Subtype, df$Gender))
+table(df[,c("Subtype","Gender")]) / rowSums(table(df[,c("Subtype","Gender")]))
+
+fisher.multcomp(table(df$Subtype, df$Smoking.history))
+table(df[,c("Subtype","Smoking.history")]) / rowSums(table(df[,c("Subtype","Smoking.history")]))
+
+table(subset(df, Smoking.history == "Never-smoker")$Subtype) / sum(table(subset(df, Smoking.history == "Never-smoker")$Subtype))
+
+```
+
+
+#### STK11/KRAS in S4 vs non-S4 (Suppl. Note 2)
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+library(ggplot2)
+library(dplyr)
+
+tbl_ip <- read.table("./input_data/Lunit_SCOPE_IO_analysis/TCGA_LUAD LUSC_Lunit SCOPE IO_JCO_5May2022.csv", sep=",", header=T)
+tbl_mut <- read.table("./input_data/Lunit_SCOPE_IO_analysis/TCGA_LUAD_KRAS_STK11.tsv", sep="\t", header=T)
+colnames(tbl_mut)[1] <- "Sample_ID"
+tbl_sub <- read.table("./input_data/Lunit_SCOPE_IO_analysis/Subtype.csv", sep=",", header=T)
+
+tbl_m <- merge(tbl_ip, tbl_mut, by="Sample_ID")
+tbl_m <- merge(tbl_m, tbl_sub, by="Patient.ID")
+
+tbl_m$KRAS_STK11 <- factor(tbl_m$KRAS_STK11, c("WT", "KRAS_mut", "STK11_mut", "KRAS_STK11_mut"))
+tbl_m$KRAS_STK11_2 <- factor(ifelse(tbl_m$KRAS_STK11 == "KRAS_STK11_mut", "KRAS_STK11_mut", "Others"), c("KRAS_STK11_mut","Others"))
+
+## S4 only
+
+tbl_m4 <- subset(tbl_m, tbl_m$Subtypes=="S4")
+
+my_comparisons <- list( c("KRAS_STK11_mut","Others") )
+
+stat.test <- tbl_m4 %>%
+                  wilcox_test(inflamed_score ~ KRAS_STK11_2, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+P <- c()
+
+p <- ggplot(tbl_m4, aes(x = KRAS_STK11_2, y = inflamed_score))+
+        geom_boxplot(aes(fill = KRAS_STK11_2), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.3)+
+        scale_fill_manual(values=c("firebrick3","dodgerblue3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),axis.text.x = element_text(angle = 45, vjust=1,  hjust=1), legend.position = "none")+
+        labs(title="S4 inflamed scores", x="", y="Inflamed score")+
+        stat_pvalue_manual(stat.test, label = "P={p}", hide.ns = FALSE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.001, size = 5)
+
+P <- c(P, list(p))
+
+stat.test <- tbl_m4 %>%
+                  wilcox_test(immune.excluded_score ~ KRAS_STK11_2, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+p <- ggplot(tbl_m4, aes(x = KRAS_STK11_2, y = immune.excluded_score))+
+        geom_boxplot(aes(fill = KRAS_STK11_2), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.3)+
+        scale_fill_manual(values=c("firebrick3","dodgerblue3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),axis.text.x = element_text(angle = 45, vjust=1,  hjust=1), legend.position = "none")+
+        labs(title="S4 immune-excluded scores", x="", y="Immune-excluded score")+
+        stat_pvalue_manual(stat.test, label = "P={p}", hide.ns = FALSE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.001, size = 5)
+
+P <- c(P, list(p))
+
+## Non-S4
+
+tbl_not_m4 <- subset(tbl_m, tbl_m$Subtypes!="S4")
+
+stat.test <- tbl_not_m4 %>%
+                  wilcox_test(inflamed_score ~ KRAS_STK11_2, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+p <- ggplot(tbl_not_m4, aes(x = KRAS_STK11_2, y = inflamed_score))+
+        geom_boxplot(aes(fill = KRAS_STK11_2), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.3)+
+        scale_fill_manual(values=c("firebrick3","dodgerblue3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),axis.text.x = element_text(angle = 45, vjust=1,  hjust=1), legend.position = "none")+
+        labs(title="Non-S4 inflamed scores", x="", y="Inflamed score")+
+        stat_pvalue_manual(stat.test, label = "P={p}", hide.ns = FALSE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.001, size = 5)
+
+P <- c(P, list(p))
+
+stat.test <- tbl_not_m4 %>%
+                  wilcox_test(immune.excluded_score ~ KRAS_STK11_2, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+p <- ggplot(tbl_not_m4, aes(x = KRAS_STK11_2, y = immune.excluded_score))+
+        geom_boxplot(aes(fill = KRAS_STK11_2), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.3)+
+        scale_fill_manual(values=c("firebrick3","dodgerblue3"))+
+        theme_bw(base_size = 20)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),axis.text.x = element_text(angle = 45, vjust=1,  hjust=1), legend.position = "none")+
+        labs(title="Non-S4 immune-excluded scores", x="", y="Immune-excluded score")+
+        stat_pvalue_manual(stat.test, label = "P={p}", hide.ns = FALSE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.001, size = 5)
+
+P <- c(P, list(p))
+
+
+pdf(file="./figures/Suppl.Note2_KRAS_STK11_comutation_Lunit_SCOPE_IO_S4_Vs_NonS4.pdf",width=25,height=7)
+
+do.call(gridExtra::grid.arrange, c(P, nrow=1, ncol=4))
+
+dev.off()
+
+```
+
+#### Stem cell signature in S3 and S4 LUAD cell lines (Suppl. Note 3)
+
+```{r}
+
+genes.stem.cells <- c("C6orf62","DNER","NELL2","LATS2","LGR5","PTPRO","LRIG1","PABPC1","NT5E","SET")
+
+df <- data.frame(sample = colnames(CCLE.LUAD),
+                 mean.stem.cell.signature = apply(CCLE.LUAD[genes.stem.cells,],2,mean)
+                 )
+
+df$subtypes <- ifelse(df$sample %in% samples.ccle.subtype.1, "S1",
+                      ifelse(df$sample %in% samples.ccle.subtype.2, "S2",
+                             ifelse(df$sample %in% samples.ccle.subtype.3, "S3",
+                                    ifelse(df$sample %in% samples.ccle.subtype.4, "S4",
+                                           ifelse(df$sample %in% samples.ccle.subtype.5, "S5", "Unassigned"
+                      )))))
+
+boxplot(mean.stem.cell.signature ~ subtypes, data=df)
+
+my_comparisons <- list( c("S3","S1"),
+                        c("S3","S4"),
+                        c("S3","Unassigned")
+                        )
+
+stat.test <- df %>%
+                  wilcox_test(mean.stem.cell.signature ~ subtypes, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+p <- ggplot(df, aes(x = subtypes, y = mean.stem.cell.signature))+
+        geom_boxplot(aes(fill = subtypes), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[2],kelly()[4],kelly()[5],kelly()[6],"gray88"))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),axis.text.x = element_text(angle = 45, vjust=1,  hjust=1))+
+        labs(title="", x="Subtype", y="Stem cell signature score")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = FALSE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.001, size = 5)
+
+pdf(file="./figures/Suppl.Note3_Stem_cell_signature_in_LUAD_cell_lines.pdf",width=8,height=8)
+
+p
+
+dev.off()
+
+```
+
+
+## SMC LUAD logistic regression (Table S24)
+
+```{r}
+
+smc.luad <- read_excel("./Korean group analysis/Result_27Jun2022/supplementary_table_SMC.xlsx",sheet = "clinic_information", col_names = TRUE)
+
+smc.luad <- subset(smc.luad, subtype != "Unassigned")
+
+smc.luad$Response <- ifelse(smc.luad$Response == "PR", 1, 0)
+smc.luad$subtypes <- ifelse(smc.luad$subtype == "S3", "subtype3", "Others")
+colnames(smc.luad)[colnames(smc.luad)=="Sex         M: M         F: F"] <- "Sex"
+colnames(smc.luad)[colnames(smc.luad)=="Smoking Never: Never Ex: Ever Current: Ever"] <- "Smoking"
+colnames(smc.luad)[colnames(smc.luad)=="IHC category"] <- "PDL1_IHC"
+
+smc.luad <- smc.luad[,c("Response","subtypes","PDL1_IHC","Age","Sex","Smoking")]
+smc.luad <- subset(smc.luad, PDL1_IHC != "non")
+
+logit <- glm(Response ~ Age + Sex + Smoking + PDL1_IHC + subtypes, data = smc.luad, family = "binomial")
+
+summary(logit)
+
+```
+
+## Lunit immune phenotypes
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+lunit.scope <- read.delim("./input_data/Lunit_SCOPE_IO_analysis/TCGA_LUAD LUSC_Lunit SCOPE IO_JCO_5May2022.csv",sep=",",header=TRUE, as.is=TRUE)
+
+###### Confusion matrix (BayesNMF vs. Lunit SCOPE immune phenotypes)
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+library(readxl)
+
+chen <- read_excel("./input_data/onc2016303x2.xls",sheet = 1, col_names = TRUE)
+
+anno <- chen
+anno <- as.data.frame(anno)
+colnames(anno) <- anno[3,]
+
+anno <- anno[4:nrow(anno),]
+
+anno$Sample <- unlist(lapply(anno$`sample ID`, function(x) paste(strsplit(x,"-")[[1]][1:3],collapse="-")))
+
+anno <- subset(anno, `tumor/normal` == "tumor")
+anno <- anno[,c("sample ID","COCA-based","expression_subtype")]
+colnames(anno) <- c("Sample","COCA-based","expression_subtype")
+anno$Sample <- sapply(anno$Sample, function(x){
+            paste(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+df2 <- data.frame(Sample=names(g.Bayes),Subtype=g.Bayes)
+
+df2 <- inner_join(df2,anno,by=c("Sample"="Sample"))
+df2$Subtype <- as.character(df2$Subtype)
+
+# sort samples 
+
+df2$expression_subtype <- factor(df2$expression_subtype, levels=c("prox.-inflam","prox.-prolif.","TRU","NA"))
+
+df2 <- df2[
+  with(df2, order(Subtype, expression_subtype)),
+]
+
+df2 <- left_join(df2,lunit.scope[,c("Patient_barcode","immune_phenotype")],by=c("Sample"="Patient_barcode"))
+
+# Confusion matrix 
+
+# TCGA-based
+library(cvms)
+
+tmp <- subset(df2, immune_phenotype != "NA")
+
+conf_mat <- confusion_matrix(targets = tmp$Subtype,
+                             predictions = tmp$immune_phenotype)
+
+pdf(file="./figures/Fig.S4C_confusion.matrix_BayesNMF_vs_Lunit_SCOPE_IP.pdf",width=8,height=8)
+
+plot_confusion_matrix(conf_mat$`Confusion Matrix`[[1]])
+
+dev.off()
+
+####################$
+# Statistical tests
+
+# chi-square goodness-of-fit test for pairwise immune phenotype group comparison within each subtype
+
+res.immune.phenotypes.subtypes <- c()
+
+# (1) Dist'n of immune phenotypes for each subtype 
+s1 <- c(7, 15, 10)
+names(s1) <- c("inflamed", "immune-excluded", "immune-desert")
+#res <- chisq.test(s1, p = c(1/3, 1/3, 1/3))
+#res # no significant difference in immune phenotype distribution in S1 (P val > 0.05)
+res.immune.phenotypes.subtypes <- rbind(res.immune.phenotypes.subtypes, data.frame(pairwise_chisq_gof_test(s1))) # perform pairwise comparisons between groups following a global chi-square goodness of fit test.
+
+s2 <- c(4, 24, 11) 
+names(s2) <- c("inflamed", "immune-excluded", "immune-desert")
+#res <- chisq.test(s2, p = c(1/3, 1/3, 1/3))
+#res # the immune phenotypes are not equally distributed in S2 (P val < 0.05)
+res.immune.phenotypes.subtypes <- rbind(res.immune.phenotypes.subtypes, data.frame(pairwise_chisq_gof_test(s2))) # perform pairwise comparisons between groups following a global chi-square goodness of fit test.
+
+s3 <- c(50, 32, 11) 
+names(s3) <- c("inflamed", "immune-excluded", "immune-desert")
+#res <- chisq.test(s3, p = c(1/3, 1/3, 1/3))
+#res # the immune phenotypes are not equally distributed in S3 (P val < 0.05)
+res.immune.phenotypes.subtypes <- rbind(res.immune.phenotypes.subtypes, data.frame(pairwise_chisq_gof_test(s3))) # perform pairwise comparisons between groups following a global chi-square goodness of fit test.
+
+s4 <- c(49, 63, 16) 
+names(s4) <- c("inflamed", "immune-excluded", "immune-desert")
+#res <- chisq.test(s4, p = c(1/3, 1/3, 1/3))
+#res # the immune phenotypes are not equally distributed in S4 (P val < 0.05)
+res.immune.phenotypes.subtypes <- rbind(res.immune.phenotypes.subtypes, data.frame(pairwise_chisq_gof_test(s4))) # perform pairwise comparisons between groups following a global chi-square goodness of fit test.
+
+s5 <- c(56, 85, 12) 
+names(s5) <- c("inflamed", "immune-excluded", "immune-desert")
+#res <- chisq.test(s5, p = c(1/3, 1/3, 1/3))
+#res # the immune phenotypes are not equally distributed in S5 (P val < 0.05)
+res.immune.phenotypes.subtypes <- rbind(res.immune.phenotypes.subtypes, data.frame(pairwise_chisq_gof_test(s5))) # perform pairwise comparisons between groups following a global chi-square goodness of fit test.
+
+res.immune.phenotypes.subtypes <- res.immune.phenotypes.subtypes[,colnames(res.immune.phenotypes.subtypes)!="n"]
+res.immune.phenotypes.subtypes$Subtypes <- c(rep("S1",3),rep("S2",3),rep("S3",3),rep("S4",3),rep("S5",3))
+
+res.immune.phenotypes.subtypes <- res.immune.phenotypes.subtypes[,c("Subtypes",colnames(res.immune.phenotypes.subtypes)[colnames(res.immune.phenotypes.subtypes)!="Subtypes"])]
+
+write.xlsx(res.immune.phenotypes.subtypes,"./tables/Table.S18_Pairwise_Lunit_SCOPE_immune_phenotype_comparison_within_each_subtype.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+```
+

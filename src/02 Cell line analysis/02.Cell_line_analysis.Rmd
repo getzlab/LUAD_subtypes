@@ -1,0 +1,1699 @@
+---
+title: "Roh, Geffen, Cha et al. 02 Cell line analysis"
+output: html_notebook
+---
+
+###### Cell line mapping 
+
+```{r fig.height=10, fig.width=55, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+######### projection for other data (CCLE data)
+
+OUTPUT_CCLE <- "./input_data/OUTPUT_CCLE/"
+system('mkdir -p ./input_data/OUTPUT_CCLE')
+
+CCLE.depMap.21Q2.sample.info.20210526 <- read.delim("./input_data/DepMap/Public_21Q2/sample_info.csv", sep=",",header=TRUE, as.is=TRUE)
+
+CCLE.LUNG.sample.info <- subset(CCLE.depMap.21Q2.sample.info.20210526, primary_disease=="Lung Cancer")
+CCLE.LUAD.sample.info <- subset(CCLE.depMap.21Q2.sample.info.20210526, primary_disease=="Lung Cancer" & lineage_sub_subtype=="NSCLC_adenocarcinoma")
+CCLE.LUSC.sample.info <- subset(CCLE.depMap.21Q2.sample.info.20210526, primary_disease=="Lung Cancer" & lineage_sub_subtype=="NSCLC_squamous")
+
+CCLE.depMap.21Q2.expression <- read.csv("./input_data/DepMap/Public_21Q2/CCLE_expression.csv")
+rownames(CCLE.depMap.21Q2.expression) <- CCLE.depMap.21Q2.expression$X
+CCLE.depMap.21Q2.expression <- CCLE.depMap.21Q2.expression[,colnames(CCLE.depMap.21Q2.expression)!="X"]
+CCLE.depMap.21Q2.expression <- as.matrix(CCLE.depMap.21Q2.expression)
+colnames(CCLE.depMap.21Q2.expression) <- sapply(colnames(CCLE.depMap.21Q2.expression), function(x){
+   str_split(x,"\\.")[[1]][1]
+})
+
+CCLE.LUAD <- CCLE.depMap.21Q2.expression[intersect(CCLE.LUAD.sample.info$DepMap_ID,
+                                                          rownames(CCLE.depMap.21Q2.expression)),]
+
+CCLE.LUAD <- t(CCLE.LUAD)
+
+df <- subset(CCLE.LUAD.sample.info, DepMap_ID %in% colnames(CCLE.LUAD))
+df <- df[match(colnames(CCLE.LUAD), df$DepMap_ID),]
+colnames(CCLE.LUAD) <- df$stripped_cell_line_name
+
+ccle.type.tpm.mat <- CCLE.LUAD
+
+#
+
+threshold.NA <- 0.1
+cut.NA <- 0.1 ## remove genes with more than 10% NA or zero values
+cut.bottom <- 0.1 ## filter out bottom 10% genes in terms of mean expression
+cut.sd <- 0.75 ## include genes with top 25% in terms of SD
+
+EXTRA <- FALSE  ### no manual curarion for markers
+cut.gene <- 100 ### number of markers in each subtype is restricted by cut.gene
+cut.W <- 0.50 ### only consider genes with the normalized association to clusters >= 0.50
+cut.fold <- rep(0.50,length(unique(g.Bayes))) ### select markers with mean difference of log2(fold changes) >= 0.50
+cut.NA <- 0.1 ### remove genes with NA values across samples > 0.1 
+
+source("./src/get.marker_for_fold.ver2.WR.R")
+marker0 <- sapply(marker0,function(x) strsplit(x,"\\|")[[1]][1])
+marker0.original <- marker0
+
+expr <- ccle.type.tpm.mat
+
+# genecode 
+genecode <- read.delim("./input_data/gencode.v26.GRCh38.genes.bed", sep="\t",header=FALSE, as.is=TRUE)
+genecode <- data.frame(Chromosome=genecode$V1,Start=genecode$V4,End=genecode$V5,
+                 Gene=sapply(genecode$V9, function(x) {
+                                          strsplit(str_split(x,";")[[1]][4],"\"")[[1]][2]
+                                        }),
+                 Gene.id=sapply(genecode$V9, function(x) {
+                                          strsplit(str_split(x,";")[[1]][1],"\"")[[1]][2]
+                                        }),
+                 Gene.Type=sapply(genecode$V9, function(x) {
+                                          strsplit(str_split(x,";")[[1]][3],"\"")[[1]][2]
+                                        })
+                   )
+genecode <- genecode[,c("Chromosome","Gene","Gene.id","Gene.Type")]
+genecode <- genecode [!duplicated(genecode), ]
+
+genecode.protein_coding <- subset(genecode,Gene.Type=="protein_coding")
+rownames(expr) <- paste(genecode.protein_coding$Gene[match(rownames(expr),genecode.protein_coding$Gene.id,nomatch=0)],rownames(expr),sep="_")
+
+index.NA <- rowSums(is.na(expr))<= round(cut.NA*ncol(expr))
+expr <- expr[index.NA,]
+expr.fold <- t(apply(expr,1,function(x) x-median(x,na.rm=T)))
+expr.fold[is.na(expr.fold)] <- 0
+expr.fold.up <- apply(expr.fold,2,function(x) ifelse(x>0,x,0))
+rownames(W1) <- sapply(rownames(W1),function(x) strsplit(x,"[|]")[[1]][1])
+for (i in 1:1) {
+    gene.expr <- sapply(rownames(expr.fold),function(x) strsplit(x,"_")[[1]][2])
+    marker0 <- rownames(expr.fold)[gene.expr%in%marker0.original] 
+    gene.marker0 <- sapply(marker0,function(x) strsplit(x,"_")[[1]][2]) 
+    W1.new <- W1[match(gene.marker0,rownames(W1),nomatch=0),]
+    rownames(W1.new) <- marker0
+    expr.fold.marker <- expr.fold[match(marker0,rownames(expr.fold),nomatch=0),]
+    x <- get.SSEC.fold.short(expr,expr.fold,expr.fold.up,cohort,marker0,W1.new)
+    g.Bayes.new <- x[[1]]
+    H.Bayes.new <- x[[2]]
+    colnames(H.Bayes.new) <- names(g.Bayes.new)
+    save(H.Bayes.new,file=paste(OUTPUT_CCLE,paste(cohort,"H.Bayes.RData",sep="."),sep=""))
+}
+
+# Plot heatmap of association between CCLE cell lines and TCGA subtypes
+
+H.Bayes.new.norm <- apply(H.Bayes.new,2,function(x) x/sum(x))
+colnames(H.Bayes.new.norm) <- sapply(colnames(H.Bayes.new.norm), function(x) strsplit(x,"_")[[1]][1])
+
+H.Bayes.new.norm.for.ccle <- H.Bayes.new.norm
+
+library(ComplexHeatmap)
+
+# row scaled data
+hm <- Heatmap(H.Bayes.new.norm, 
+        name = "Normalized Association of Cell Lines to TCGA Subtypes", #title of legend
+        column_title = "CCLE samples", row_title = "TCGA expression subtypes",
+        row_names_gp = gpar(fontsize = 11), # Text size for row names
+        row_names_side = "left",
+        rect_gp = gpar(col= "white"), # "graphic parameters for drawing rectangles (for heatmap body)"
+        cluster_columns = TRUE,
+        cluster_rows = FALSE,
+        show_column_names = TRUE,
+        show_row_names = TRUE,
+        show_column_dend = FALSE,
+        show_row_dend = FALSE,
+        column_title_side = "bottom",
+        column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+        heatmap_legend_param = list(legend_direction = "horizontal",
+                                  legend_width = unit(5, "cm"), title_position = "topcenter")
+        )
+
+samples <- as.character(colnames(H.Bayes.new.norm)[column_order(hm)])
+
+Diff.first.second <- c()
+for(c in colnames(H.Bayes.new.norm)){
+  
+  diff <- max(H.Bayes.new.norm[,c]) - H.Bayes.new.norm[,c]
+  diff.first.second <- as.numeric(sort(diff)[2])
+  Diff.first.second <- c(Diff.first.second, diff.first.second)
+  
+}
+df <- data.frame(samples=colnames(H.Bayes.new.norm),diff.first.second=Diff.first.second)
+
+# normalized association > 0.5 & difference between the highest and second highest > 0.2
+samples.ccle.subtype.1 <- intersect(names(H.Bayes.new.norm["G1",][H.Bayes.new.norm["G1",]>0.5]), subset(df,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.3 <- intersect(names(H.Bayes.new.norm["G3",][H.Bayes.new.norm["G3",]>0.5]), subset(df,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.4 <- intersect(names(H.Bayes.new.norm["G4",][H.Bayes.new.norm["G4",]>0.5]), subset(df,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.5 <- intersect(names(H.Bayes.new.norm["G5",][H.Bayes.new.norm["G5",]>0.5]), subset(df,diff.first.second > 0.2)$sample)
+
+subtypes <- ifelse(samples %in% samples.ccle.subtype.1,"Subtype 1", 
+                 ifelse(samples %in% samples.ccle.subtype.3,"Subtype 3", 
+                        ifelse(samples %in% samples.ccle.subtype.4,"Subtype 4", 
+                              ifelse(samples %in% samples.ccle.subtype.5,"Subtype 5","NA"))))
+
+#############################$
+
+df <- data.frame(Sample=samples,Subtypes=subtypes)
+
+temp <- t(H.Bayes.new.norm)
+temp <- temp[samples,]
+
+df <- cbind(df, temp)
+
+temp <- t(CCLE.LUAD)
+temp <- temp[samples,]
+
+df <- cbind(df, temp)
+
+colnames(df)[colnames(df)=="G1"] <- "S1"
+colnames(df)[colnames(df)=="G2"] <- "S2"
+colnames(df)[colnames(df)=="G3"] <- "S3"
+colnames(df)[colnames(df)=="G4"] <- "S4"
+colnames(df)[colnames(df)=="G5"] <- "S5"
+
+#############################$
+
+col2 = c("Subtype 1" = kelly()[2],
+         #"Subtype 2" = kelly()[3],
+         "Subtype 3" = kelly()[4],
+         "Subtype 4" = kelly()[5],
+         "Subtype 5" = kelly()[6],
+         "NA" = "grey")
+  
+subtypes2 <- subtypes
+names(subtypes2) <- samples
+
+mat <- rbind(subtype = subtypes2)
+hm.subtype <- Heatmap(mat, name = "Subtype", col = col2,
+                     width = unit(400, "mm"),
+                     height = unit(10, "mm"),)
+
+ht_list = hm %v% hm.subtype
+
+#####################$
+# Sorted by subtypes
+
+sample.order <- c(samples.ccle.subtype.1,samples.ccle.subtype.3,samples.ccle.subtype.4,samples.ccle.subtype.5,
+                           setdiff(samples,c(samples.ccle.subtype.1,samples.ccle.subtype.3,samples.ccle.subtype.4,samples.ccle.subtype.5)))
+mat <- H.Bayes.new.norm[,sample.order]
+rownames(mat) <- c("S1","S2","S3","S4","S5")
+
+library(ComplexHeatmap)
+
+# row scaled data
+hm <- Heatmap(mat, 
+        width = unit(135, "cm"),
+        height = unit(12, "cm"),
+        name = "Normalized Association of cell Lines to TCGA expression subtypes", #title of legend
+        #column_title = "CCLE samples", 
+        row_title = "TCGA expression subtypes",
+        row_names_gp = gpar(fontsize = 30), # Text size for row names
+        column_names_gp = gpar(fontsize = 30), # Text size for column names
+        row_names_side = "left",
+        rect_gp = gpar(col= "white"), # "graphic parameters for drawing rectangles (for heatmap body)"
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        show_column_names = FALSE,
+        show_row_names = TRUE,
+        show_column_dend = FALSE,
+        show_row_dend = FALSE,
+        #column_title_side = "bottom",
+        column_title_gp = gpar(fontsize = 30, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 30, fontface = "bold"),
+        heatmap_legend_param = list(legend_direction = "horizontal",
+                                  legend_width = unit(10, "cm"), 
+                                  legend_height = unit(4, "cm"),
+                                  grid_width = unit(2, "cm"),
+                                  grid_height = unit(1.5, "cm"),
+                                  title_gp = gpar(fontsize = 30, fontface = "bold"),
+                                  labels_gp = gpar(fontsize = 30),
+                                  title_position = "topcenter")
+        )
+
+samples <- sample.order
+
+subtypes <- ifelse(samples %in% samples.ccle.subtype.1,"S1", 
+                 ifelse(samples %in% samples.ccle.subtype.3,"S3", 
+                        ifelse(samples %in% samples.ccle.subtype.4,"S4", 
+                              ifelse(samples %in% samples.ccle.subtype.5,"S5","Unassigned"))))
+
+col2 = c("S1" = kelly()[2],
+         "S3" = kelly()[4],
+         "S4" = kelly()[5],
+         "S5" = kelly()[6],
+         "Unassigned" = "grey")
+  
+subtypes2 <- subtypes
+names(subtypes2) <- samples
+
+mat <- rbind(subtype = subtypes2)
+hm.subtype <- Heatmap(mat, name = "Subtypes", col = col2,
+                     width = unit(130, "cm"),
+                     height = unit(2, "cm"),
+                     show_row_names = FALSE,
+                     show_column_names = TRUE,
+                     column_title = "CCLE samples", 
+                     column_title_side = "bottom",
+                      column_title_gp = gpar(fontsize = 30, fontface = "bold"),
+                     column_names_gp = gpar(fontsize = 30), # Text size for column names
+                     heatmap_legend_param = list(#legend_direction = "horizontal",
+                                  legend_width = unit(6, "cm"), 
+                                  legend_height = unit(20, "cm"),
+                                  grid_width = unit(1.5, "cm"),
+                                  grid_height = unit(1.5, "cm"),
+                                  title_gp = gpar(fontsize = 30),
+                                  labels_gp = gpar(fontsize = 30)#,
+                                  #title_position = "leftcenter-rot")
+                     ))
+
+# Fig.2A
+
+draw(hm, heatmap_legend_side = "top")
+
+pdf(file="./figures/Fig.2A_ccle.norm.assoc.heatmap.pdf",width=55,height=8.5)
+
+draw(hm, heatmap_legend_side = "top")
+
+dev.off()
+
+hm.subtype
+
+pdf(file="./figures/Fig.2A_ccle.subtype.labels.pdf",width=55,height=4)
+
+hm.subtype
+
+dev.off()
+
+# Save sample-subtype membership information ("H.Bayes.new.norm")
+df <- as.data.frame(t(H.Bayes.new.norm))
+colnames(df) <- c("S1","S2","S3","S4","S5")
+df$Samples <- rownames(df)
+
+Diff.first.second <- c()
+for(c in colnames(H.Bayes.new.norm)){
+  
+  diff <- max(H.Bayes.new.norm[,c]) - H.Bayes.new.norm[,c]
+  diff.first.second <- as.numeric(sort(diff)[2])
+  Diff.first.second <- c(Diff.first.second, diff.first.second)
+  
+}
+df2 <- data.frame(samples=colnames(H.Bayes.new.norm),diff.first.second=Diff.first.second)
+
+# normalized association > 0.5 & difference between the highest and second highest > 0.2
+samples.ccle.subtype.1 <- intersect(names(H.Bayes.new.norm["G1",][H.Bayes.new.norm["G1",]>0.5]), subset(df2,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.3 <- intersect(names(H.Bayes.new.norm["G3",][H.Bayes.new.norm["G3",]>0.5]), subset(df2,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.4 <- intersect(names(H.Bayes.new.norm["G4",][H.Bayes.new.norm["G4",]>0.5]), subset(df2,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.5 <- intersect(names(H.Bayes.new.norm["G5",][H.Bayes.new.norm["G5",]>0.5]), subset(df2,diff.first.second > 0.2)$sample)
+
+df$Subtypes <- ifelse(df$Samples %in% samples.ccle.subtype.1, "S1",
+                      ifelse(df$Samples %in% samples.ccle.subtype.3, "S3",
+                             ifelse(df$Samples %in% samples.ccle.subtype.4, "S4",
+                                    ifelse(df$Samples %in% samples.ccle.subtype.5, "S5", "Unassigned"
+                      ))))
+
+df <- df[,c("Samples","Subtypes","S1","S2","S3","S4","S5")]
+
+df <- df[order(df$Subtypes),]
+
+write.xlsx(df,"./tables/Table.S10_Sample_Subtype_membership_for_CCLE_LUAD.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+```
+
+###### Mutation freq (TCGA vs. CCLE)
+
+```{r message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+############################$
+# Hotspot mutations and CNAs
+############################$
+
+# log2(X + 1) gene level copy number data
+CCLE.21Q2.gene.cn <- read.delim("./input_data/DepMap/Public_21Q2/CCLE_gene_cn.csv", sep=",",header=TRUE, as.is=TRUE)
+rownames(CCLE.21Q2.gene.cn) <- CCLE.21Q2.gene.cn$X
+CCLE.21Q2.gene.cn <- CCLE.21Q2.gene.cn[,colnames(CCLE.21Q2.gene.cn)[colnames(CCLE.21Q2.gene.cn)!="X"]]
+
+# Binary heatmap for hotspot point mutations and indels
+CCLE.21Q2.hotspot.mutation <- read.delim("./input_data/DepMap/Public_21Q2/CCLE_mutations_bool_hotspot.csv", sep=",",header=TRUE, as.is=TRUE)
+rownames(CCLE.21Q2.hotspot.mutation) <- CCLE.21Q2.hotspot.mutation$X
+CCLE.21Q2.hotspot.mutation <- CCLE.21Q2.hotspot.mutation[,colnames(CCLE.21Q2.hotspot.mutation)[colnames(CCLE.21Q2.hotspot.mutation)!="X"]]
+
+samples.of.interest <- c(samples.ccle.subtype.1,samples.ccle.subtype.3,samples.ccle.subtype.4,samples.ccle.subtype.5)
+
+df <- CCLE.LUAD.sample.info
+df <- subset(df, stripped_cell_line_name %in% samples.of.interest)
+
+CCLE.LUAD.hotspot.mutation <- CCLE.21Q2.hotspot.mutation[intersect(df$DepMap_ID,rownames(CCLE.21Q2.hotspot.mutation)),]
+CCLE.LUAD.hotspot.mutation <- t(CCLE.LUAD.hotspot.mutation)
+
+rownames(CCLE.LUAD.hotspot.mutation) <- sapply(rownames(CCLE.LUAD.hotspot.mutation), function(x){
+  str_split(x,"\\.")[[1]][1]
+})
+
+###################$
+# Subtype 3 Mutations
+###################$
+
+# mutated in > 10% of S3 samples in TCGA LUAD
+S3_mut_genes <- c("TP53","KRAS","KAEP1","ARID1A","NF1","BRAF","MGA","ARID2")
+
+genes.of.interest <- intersect(S3_mut_genes,rownames(CCLE.LUAD.hotspot.mutation)) 
+samples.of.interest <- samples.ccle.subtype.3
+
+# (1) TCGA 
+
+OUTPUT_ttype <- "./input_data/BayesNMF_output/"
+load(file=paste(OUTPUT_ttype,"g.Bayes.RData",sep=""))
+
+maf.snp.S3 <- subset(maf.snp, Tumor_Sample_Barcode %in% names(g.Bayes)[g.Bayes==3] 
+                              & Variant_Classification %in% c("Frame_Shift_Del", "Frame_Shift_Ins", "Splice_Site", "Translation_Start_Site","Nonsense_Mutation", "Nonstop_Mutation", "In_Frame_Del","In_Frame_Ins", "Missense_Mutation", "Silent"))
+
+mat<- c()
+for(s in unique(maf.snp.S3$Tumor_Sample_Barcode)){
+  
+  temp <- subset(maf.snp, Tumor_Sample_Barcode == s)
+  mat <- cbind(mat, as.numeric(genes.of.interest %in% unique(temp$Hugo_Symbol)))
+  
+}
+
+rownames(mat) <- genes.of.interest
+colnames(mat) <- unique(maf.snp.S3$Tumor_Sample_Barcode)
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CCLE 
+
+df <- CCLE.LUAD.sample.info[,c("DepMap_ID","stripped_cell_line_name")]
+df <- df[match(colnames(CCLE.LUAD.hotspot.mutation), df$DepMap_ID),]
+colnames(CCLE.LUAD.hotspot.mutation) <- df$stripped_cell_line_name
+
+mat <- CCLE.LUAD.hotspot.mutation[genes.of.interest, samples.of.interest]
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.ccle <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CCLE-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CCLE-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CCLE-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(genes.of.interest)),rep(n.ccle,length(genes.of.interest)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CCLE-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df$Upper[df$Pct==0] <- 0 # no CIs for genes with 0%
+df <- subset(df, ! Gene %in% as.character(unique(df$Gene[df$Pct==0]))) # remove genes with 0% in CCLE 
+
+# Fig.S5A
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S3: Gene Mutations") +
+       xlab("Genes with recurrent mutations in TCGA LUAD S3") +
+       ylab("Perecentage of samples \n with gene mutation \n among S3 cell lines") +
+       scale_fill_manual(values=c("grey", "grey50")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.S5A_pct.gene.mutated.in.S3.pdf",width=10,height=5)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+###################$
+# Subtype 4 Mutations
+###################$
+
+# mutated in > 10% of S4 samples in TCGA LUAD
+S4_mut_genes <- c("TP53","KRAS","KAEP1","STK11","NF1","SMARCA4","ATM","FANCM","PCDHGA6")
+
+genes.of.interest <- intersect(S4_mut_genes,rownames(CCLE.LUAD.hotspot.mutation)) 
+samples.of.interest <- samples.ccle.subtype.4
+
+# (1) TCGA 
+
+OUTPUT_ttype <- "./input_data/BayesNMF_output/"
+load(file=paste(OUTPUT_ttype,"g.Bayes.RData",sep=""))
+
+maf.snp.S4 <- subset(maf.snp, Tumor_Sample_Barcode %in% names(g.Bayes)[g.Bayes==4] 
+                              & Variant_Classification %in% c("Frame_Shift_Del", "Frame_Shift_Ins", "Splice_Site", "Translation_Start_Site","Nonsense_Mutation", "Nonstop_Mutation", "In_Frame_Del","In_Frame_Ins", "Missense_Mutation", "Silent"))
+
+mat<- c()
+for(s in unique(maf.snp.S4$Tumor_Sample_Barcode)){
+  
+  temp <- subset(maf.snp, Tumor_Sample_Barcode == s)
+  mat <- cbind(mat, as.numeric(genes.of.interest %in% unique(temp$Hugo_Symbol)))
+  
+}
+
+rownames(mat) <- genes.of.interest
+colnames(mat) <- unique(maf.snp.S4$Tumor_Sample_Barcode)
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# STK11 mutation enriched in KRAS-mutant tumors in S4?
+tmp <- data.frame(t(mat[c("KRAS","STK11"),]))
+dat <- data.frame(
+           "KRAS_mut"= c(nrow(subset(tmp, KRAS==1 & STK11==1)),nrow(subset(tmp, KRAS==1 & STK11==0))),
+           "KRAS_wt" = c(nrow(subset(tmp, KRAS==0 & STK11==1)),nrow(subset(tmp, KRAS==0 & STK11==0))),
+           row.names = c("STK11_mut","STK11_wt"),
+           stringsAsFactors = FALSE
+)
+colnames(dat) <- c("KRAS_mut", "KRAS_wt")
+fisher.test(dat)
+
+# (2) CCLE 
+
+mat <- CCLE.LUAD.hotspot.mutation[genes.of.interest, samples.of.interest]
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.ccle <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CCLE-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CCLE-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CCLE-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(genes.of.interest)),rep(n.ccle,length(genes.of.interest)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CCLE-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df$Upper[df$Pct==0] <- 0
+df <- subset(df, ! Gene %in% as.character(unique(df$Gene[df$Pct==0]))) # remove genes with 0% in CCLE 
+
+# Fig.S5A
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S4: Gene Mutations") +
+       xlab("Genes with recurrent mutations in TCGA LUAD S4") +
+       ylab("Perecentage of samples \n with gene mutation \n among S4 cell lines") +
+       scale_fill_manual(values=c("grey", "grey50")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.S5A_pct.gene.mutated.in.S4.pdf",width=10,height=5)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+
+
+```
+
+
+###### CN freq (TCGA vs. CCLE)
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+df <- CCLE.LUAD.sample.info
+df <- subset(df, stripped_cell_line_name %in% samples.of.interest)
+
+CCLE.LUAD.cn <- CCLE.21Q2.gene.cn[intersect(df$DepMap_ID,rownames(CCLE.21Q2.gene.cn)),]
+CCLE.LUAD.cn <- t(CCLE.LUAD.cn)
+
+rownames(CCLE.LUAD.cn) <- sapply(rownames(CCLE.LUAD.cn), function(x){
+  str_split(x,"\\.")[[1]][1]
+})
+
+df <- CCLE.LUAD.sample.info[,c("DepMap_ID","stripped_cell_line_name")]
+df <- df[match(colnames(CCLE.LUAD.cn), df$DepMap_ID),]
+colnames(CCLE.LUAD.cn) <- df$stripped_cell_line_name
+
+################$
+# Subtype 3 Amp
+################$
+
+# Important genes from TCGA 
+S3_amp_genes <- c("MCL1","TERT","MET","KAT6A","KRAS","CDK4","MDM2",
+                  "TTF1", # "TTF1"="NKX2-1",
+                  "ERBB2",
+                  "CCNE1")
+
+genes.of.interest <- intersect(S3_amp_genes,rownames(CCLE.LUAD.cn)) 
+samples.of.interest <- samples.ccle.subtype.3
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.3.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_3/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.3.cn[,colnames(TCGA.LUAD.subtype.3.cn)[! colnames(TCGA.LUAD.subtype.3.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.3.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.3.cn)
+
+mat <- mat[genes.of.interest,]
+
+mat[mat == 2] <- 1
+mat[mat == -1] <- 0
+mat[mat == -2] <- 0
+
+mat.tcga.s3.amp <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CCLE
+
+df <- CCLE.LUAD.sample.info
+df <- subset(df, stripped_cell_line_name %in% samples.of.interest)
+
+CCLE.LUAD.cn <- CCLE.21Q2.gene.cn[intersect(df$DepMap_ID,rownames(CCLE.21Q2.gene.cn)),]
+CCLE.LUAD.cn <- t(CCLE.LUAD.cn)
+
+rownames(CCLE.LUAD.cn) <- sapply(rownames(CCLE.LUAD.cn), function(x){
+  str_split(x,"\\.")[[1]][1]
+})
+
+df <- CCLE.LUAD.sample.info[,c("DepMap_ID","stripped_cell_line_name")]
+df <- df[match(colnames(CCLE.LUAD.cn), df$DepMap_ID),]
+colnames(CCLE.LUAD.cn) <- df$stripped_cell_line_name
+
+samples.excluded <- setdiff(samples.of.interest,colnames(CCLE.LUAD.cn))
+
+mat <- CCLE.LUAD.cn[genes.of.interest, setdiff(samples.of.interest,samples.excluded)]
+
+# Log2 CN ratio threshold of 0.3
+mat[mat<log2(1/2^0.3+1)] <- -1 # copy number loss if Log2 CN ratio < -0.3
+mat[mat>=log2(1/2^0.3+1) & mat<=log2(2^0.3+1) ] <- 0 # No CNAs
+mat[mat>log2(2^0.3+1)] <- 1 # copy number gain if Log2 CN ratio > 0.3
+
+mat[mat==-1] <- 0
+
+mat.s3.amp <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.ccle <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CCLE-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene[df$Gene=="TTF1"] <- "NKX2-1"
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CCLE-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CCLE-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(genes.of.interest)),rep(n.ccle,length(genes.of.interest)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CCLE-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df$Upper[df$Pct==0] <- 0
+df <- subset(df, ! Gene %in% as.character(unique(df$Gene[df$Pct==0]))) # remove genes with 0% in CCLE 
+
+# Fig.S5B
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S3: Gene Amplification") +
+       xlab("Genes with recurrent amplification in TCGA LUAD S3") +
+       ylab("Perecentage of samples \n with gene amplification \n among S3 cell lines") +
+       scale_fill_manual(values=c("darkorange", "firebrick")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.S5B_pct.gene.amp.in.S3.pdf",width=10,height=5)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+################$
+# Subtype 3 Del
+################$
+
+# Important genes from TCGA 
+S3_del_genes <- c("UNC5D","PTPRD","CDKN2A","CDKN2B","KDM6A")
+
+genes.of.interest <- intersect(S3_del_genes,rownames(CCLE.LUAD.cn)) 
+samples.of.interest <- samples.ccle.subtype.3
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.3.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_3/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.3.cn[,colnames(TCGA.LUAD.subtype.3.cn)[! colnames(TCGA.LUAD.subtype.3.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.3.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.3.cn)
+
+mat <- mat[genes.of.interest,]
+
+mat[mat == 1] <- 0
+mat[mat == 2] <- 0
+mat[mat == -1] <- 1
+mat[mat == -2] <- 1
+
+mat.tcga.s3.del <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CCLE
+
+df <- CCLE.LUAD.sample.info
+df <- subset(df, stripped_cell_line_name %in% samples.of.interest)
+
+CCLE.LUAD.cn <- CCLE.21Q2.gene.cn[intersect(df$DepMap_ID,rownames(CCLE.21Q2.gene.cn)),]
+CCLE.LUAD.cn <- t(CCLE.LUAD.cn)
+
+rownames(CCLE.LUAD.cn) <- sapply(rownames(CCLE.LUAD.cn), function(x){
+  str_split(x,"\\.")[[1]][1]
+})
+
+df <- CCLE.LUAD.sample.info[,c("DepMap_ID","stripped_cell_line_name")]
+df <- df[match(colnames(CCLE.LUAD.cn), df$DepMap_ID),]
+colnames(CCLE.LUAD.cn) <- df$stripped_cell_line_name
+
+samples.excluded <- setdiff(samples.of.interest,colnames(CCLE.LUAD.cn))
+
+mat <- CCLE.LUAD.cn[genes.of.interest, setdiff(samples.of.interest,samples.excluded)]
+
+# Log2 CN ratio threshold of 0.3
+mat[mat<log2(1/2^0.3+1)] <- -1 # copy number loss if Log2 CN ratio < -0.3
+mat[mat>=log2(1/2^0.3+1) & mat<=log2(2^0.3+1) ] <- 0 # No CNAs
+mat[mat>log2(2^0.3+1)] <- 1 # copy number gain if Log2 CN ratio > 0.3
+
+mat[mat==1] <- 0
+mat[mat==-1] <- 1
+
+mat.s3.del <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.ccle <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CCLE-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CCLE-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CCLE-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(genes.of.interest)),rep(n.ccle,length(genes.of.interest)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CCLE-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df$Upper[df$Pct==0] <- 0
+df <- subset(df, ! Gene %in% as.character(unique(df$Gene[df$Pct==0]))) # remove genes with 0% in CCLE 
+chisq.test(df_wide[,as.character(unique(df$Gene[df$Pct!=0]))]) # Chi-square test without genes wth 0% in CCLE
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S3: Gene Deletion") +
+       xlab("Genes with recurrent deletion in TCGA LUAD S3") +
+       ylab("Percentage of samples \n with gene deletion \n among S3 cell lines") +
+       scale_fill_manual(values=c("deepskyblue", "dodgerblue4")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.S5B_pct.gene.del.in.S3.pdf",width=10,height=5)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+################$
+# Subtype 4 Amp
+################$
+
+# Important genes from TCGA 
+S4_amp_genes <- c("MYCL","MCL1","PIK3CA","CCND3","EGFR","MET","FGFR1","WHSC1L1",
+                  "CCND1","KRAS","MDM2",
+                  "TTF1", # "TTF1"="NKX2-1",
+                  "ERBB2",
+                  "CCNE1","MAPK1")
+
+genes.of.interest <- intersect(S4_amp_genes,rownames(CCLE.LUAD.cn)) 
+samples.of.interest <- samples.ccle.subtype.4
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.4.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_4/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.4.cn[,colnames(TCGA.LUAD.subtype.4.cn)[! colnames(TCGA.LUAD.subtype.4.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.4.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.4.cn)
+
+mat <- mat[genes.of.interest,]
+
+mat[mat == 2] <- 1
+mat[mat == -1] <- 0
+mat[mat == -2] <- 0
+
+mat.tcga.s4.amp <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CCLE
+
+df <- CCLE.LUAD.sample.info
+df <- subset(df, stripped_cell_line_name %in% samples.of.interest)
+
+CCLE.LUAD.cn <- CCLE.21Q2.gene.cn[intersect(df$DepMap_ID,rownames(CCLE.21Q2.gene.cn)),]
+CCLE.LUAD.cn <- t(CCLE.LUAD.cn)
+
+rownames(CCLE.LUAD.cn) <- sapply(rownames(CCLE.LUAD.cn), function(x){
+  str_split(x,"\\.")[[1]][1]
+})
+
+df <- CCLE.LUAD.sample.info[,c("DepMap_ID","stripped_cell_line_name")]
+df <- df[match(colnames(CCLE.LUAD.cn), df$DepMap_ID),]
+colnames(CCLE.LUAD.cn) <- df$stripped_cell_line_name
+
+samples.excluded <- setdiff(samples.of.interest,colnames(CCLE.LUAD.cn))
+
+mat <- CCLE.LUAD.cn[genes.of.interest, setdiff(samples.of.interest,samples.excluded)]
+
+# Log2 CN ratio threshold of 0.3
+mat[mat<log2(1/2^0.3+1)] <- -1 # copy number loss if Log2 CN ratio < -0.3
+mat[mat>=log2(1/2^0.3+1) & mat<=log2(2^0.3+1) ] <- 0 # No CNAs
+mat[mat>log2(2^0.3+1)] <- 1 # copy number gain if Log2 CN ratio > 0.3
+
+mat[mat==-1] <- 0
+
+mat.s4.amp <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.ccle <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CCLE-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene[df$Gene=="TTF1"] <- "NKX2-1"
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CCLE-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CCLE-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(genes.of.interest)),rep(n.ccle,length(genes.of.interest)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CCLE-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df$Upper[df$Pct==0] <- 0
+df <- subset(df, ! Gene %in% as.character(unique(df$Gene[df$Pct==0]))) # remove genes with 0% in CCLE 
+
+# Fig.S5B
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S4: Gene Amplification") +
+       xlab("Genes with recurrent amplification in TCGA LUAD S4") +
+       ylab("Perecentage of samples \n with gene amplification \n among S4 cell lines") +
+       scale_fill_manual(values=c("darkorange", "firebrick")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.S5B_pct.gene.amp.in.S4.pdf",width=10,height=5)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+################$
+# Subtype 4 Del
+################$
+
+# Important genes from TCGA 
+S4_del_genes <- c("FAT1","PTPRD","CDKN2A","CDKN2B","SMARCA4")
+
+genes.of.interest <- intersect(S4_del_genes,rownames(CCLE.LUAD.cn)) 
+samples.of.interest <- samples.ccle.subtype.4
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.4.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_4/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.4.cn[,colnames(TCGA.LUAD.subtype.4.cn)[! colnames(TCGA.LUAD.subtype.4.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.4.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.4.cn)
+
+mat <- mat[genes.of.interest,]
+
+mat[mat == 1] <- 0
+mat[mat == 2] <- 0
+mat[mat == -1] <- 1
+mat[mat == -2] <- 1
+
+mat.tcga.s3.del <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CCLE
+
+df <- CCLE.LUAD.sample.info
+df <- subset(df, stripped_cell_line_name %in% samples.of.interest)
+
+CCLE.LUAD.cn <- CCLE.21Q2.gene.cn[intersect(df$DepMap_ID,rownames(CCLE.21Q2.gene.cn)),]
+CCLE.LUAD.cn <- t(CCLE.LUAD.cn)
+
+rownames(CCLE.LUAD.cn) <- sapply(rownames(CCLE.LUAD.cn), function(x){
+  str_split(x,"\\.")[[1]][1]
+})
+
+df <- CCLE.LUAD.sample.info[,c("DepMap_ID","stripped_cell_line_name")]
+df <- df[match(colnames(CCLE.LUAD.cn), df$DepMap_ID),]
+colnames(CCLE.LUAD.cn) <- df$stripped_cell_line_name
+
+samples.excluded <- setdiff(samples.of.interest,colnames(CCLE.LUAD.cn))
+
+mat <- CCLE.LUAD.cn[genes.of.interest, setdiff(samples.of.interest,samples.excluded)]
+
+# Log2 CN ratio threshold of 0.3
+mat[mat<log2(1/2^0.3+1)] <- -1 # copy number loss if Log2 CN ratio < -0.3
+mat[mat>=log2(1/2^0.3+1) & mat<=log2(2^0.3+1) ] <- 0 # No CNAs
+mat[mat>log2(2^0.3+1)] <- 1 # copy number gain if Log2 CN ratio > 0.3
+
+mat[mat==1] <- 0
+mat[mat==-1] <- 1
+
+mat.s3.del <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.ccle <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CCLE-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CCLE-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CCLE-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(genes.of.interest)),rep(n.ccle,length(genes.of.interest)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CCLE-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df$Upper[df$Pct==0] <- 0
+df <- subset(df, ! Gene %in% as.character(unique(df$Gene[df$Pct==0]))) # remove genes with 0% in CCLE 
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S4: Gene Deletion") +
+       xlab("Genes with recurrent deletion in TCGA LUAD S4") +
+       ylab("Percentage of samples \n with gene deletion \n among S4 cell lines") +
+       scale_fill_manual(values=c("deepskyblue", "dodgerblue4")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.S5B_pct.gene.del.in.S4.pdf",width=10,height=5)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+
+```
+
+
+###### MET/GSK3B correlation 
+
+```{r fig.height=5, fig.width=15}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# MET - GSK3B
+
+Diff.first.second <- c()
+for(c in colnames(H.Bayes.new.norm)){
+  
+  diff <- max(H.Bayes.new.norm[,c]) - H.Bayes.new.norm[,c]
+  diff.first.second <- as.numeric(sort(diff)[2])
+  Diff.first.second <- c(Diff.first.second, diff.first.second)
+  
+}
+df <- data.frame(samples=colnames(H.Bayes.new.norm),diff.first.second=Diff.first.second)
+
+# normalized association > 0.5 & difference between the highest and second highest > 0.2
+samples.ccle.subtype.1 <- intersect(names(H.Bayes.new.norm["G1",][H.Bayes.new.norm["G1",]>0.5]), subset(df,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.3 <- intersect(names(H.Bayes.new.norm["G3",][H.Bayes.new.norm["G3",]>0.5]), subset(df,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.4 <- intersect(names(H.Bayes.new.norm["G4",][H.Bayes.new.norm["G4",]>0.5]), subset(df,diff.first.second > 0.2)$sample)
+samples.ccle.subtype.5 <- intersect(names(H.Bayes.new.norm["G5",][H.Bayes.new.norm["G5",]>0.5]), subset(df,diff.first.second > 0.2)$sample)
+
+gene1 <- "MET"
+
+P <- list()
+  
+for(gene2 in c("GSK3B")){
+  
+  df <- data.frame(Sample=colnames(H.Bayes.new.norm), 
+                   Subtype=ifelse(colnames(H.Bayes.new.norm) %in% samples.ccle.subtype.1, "S1",
+                                  ifelse(colnames(H.Bayes.new.norm) %in% samples.ccle.subtype.3, "S3",
+                                         ifelse(colnames(H.Bayes.new.norm) %in% samples.ccle.subtype.4, "S4",
+                                               ifelse(colnames(H.Bayes.new.norm) %in% samples.ccle.subtype.5, "S5", "Unassigned"
+                                  )))))
+  df <- subset(df, Subtype %in% c("S3","S4","Unassigned"))
+  
+  mat <- ccle.type.tpm.mat[c(gene1,gene2),]
+  res <- data.frame(t(mat))
+  colnames(res) <- c("Gene1","Gene2")
+  res$Sample <- rownames(res)
+  
+  res <- inner_join(df,res,by=c("Sample"="Sample"))
+  
+  gg <- ggplot(res,aes(x=Gene1, y=Gene2, color= Subtype))+
+    geom_point()+
+    geom_smooth(method = lm)+
+    scale_color_manual(values=c(kelly()[4],kelly()[5],"grey"))+
+    theme_bw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    labs(title="", x=gene1, y=gene2)+
+    xlab(paste0(gene1," gene expression")) +
+    ylab(paste0(gene2," gene expression")) +
+    stat_cor(method = "pearson",label.y.npc= "top", color= c(kelly()[4],kelly()[5],"grey"))+
+    facet_wrap(~res$Subtype,scales = "free")
+  
+  P <- c(P, list(gg))
+  
+}
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 1, ncol = 1))
+
+pdf(file="./figures/Fig.5D_Corr_of_MET_GSK3B_S3_vs_S4_vs_others_CCLE_LUAD.pdf",width=15,height=5)
+
+do.call(gridExtra::grid.arrange, c(P, nrow = 1, ncol = 1))
+
+dev.off()
+
+
+```
+
+###### Cell line vulnerability analysis
+
+```{r message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+Achilles.gene.effect <- read.delim("./input_data/DepMap/Public_21Q2/Achilles_gene_effect.csv", sep=",",header=TRUE, as.is=TRUE)
+rownames(Achilles.gene.effect) <- Achilles.gene.effect$X
+Achilles.gene.effect <- Achilles.gene.effect[,colnames(Achilles.gene.effect)!="X"]
+Achilles.gene.effect <- as.matrix(Achilles.gene.effect)
+
+####################$
+# Subtype 3 analysis
+####################$
+
+mat <- Achilles.gene.effect
+
+colnames(mat) <- sapply(colnames(mat), function(x){
+  str_split(x,"\\.")[[1]][1]
+})
+
+# 45 LUAD cell lines with both CRISPR and expression data available 
+length(intersect(rownames(mat),intersect(CCLE.LUAD.sample.info$DepMap_ID,rownames(CCLE.depMap.21Q2.expression)) ) )
+
+# Dependency data
+df <- as.data.frame(mat)
+df$DepMap_ID <- rownames(df)
+df <- df[,c("DepMap_ID",colnames(df)[colnames(df)!="DepMap_ID"])]
+
+samples.of.interest <- subset(CCLE.depMap.21Q2.sample.info.20210526, stripped_cell_line_name %in% samples.ccle.subtype.3 & DepMap_ID %in% rownames(df) )$stripped_cell_line_name # samples with both expression data and dependency data
+
+samples.control <- setdiff(subset(CCLE.depMap.21Q2.sample.info.20210526, primary_disease=="Lung Cancer" & DepMap_ID %in% rownames(df))$stripped_cell_line_name,
+                           samples.of.interest) # All other lung cancer cell lines with depmap data 
+# [note] samples.control needs to be present in the CCLE expression dataset (for cell line vulnerability analysis)
+samples.control <- intersect(samples.control,
+                             subset(CCLE.depMap.21Q2.sample.info.20210526, DepMap_ID %in% rownames(CCLE.depMap.21Q2.expression))$stripped_cell_line_name ) # All other lung cancer cell lines with both depmap data and expression data 
+
+genes <- colnames(df)[colnames(df)!="DepMap_ID"]
+
+df <- subset(df, DepMap_ID %in% subset(CCLE.depMap.21Q2.sample.info.20210526,stripped_cell_line_name %in% c(samples.of.interest,samples.control) )$DepMap_ID)
+
+df <- inner_join(CCLE.depMap.21Q2.sample.info.20210526[,c("DepMap_ID","stripped_cell_line_name")],df,by="DepMap_ID")
+
+df$group <- ifelse(df$stripped_cell_line_name %in% samples.of.interest, "Subtype of interest", "Others")
+df$group2 <- ifelse(df$stripped_cell_line_name %in% samples.of.interest, "Subtype of interest",
+                    ifelse(! df$stripped_cell_line_name %in% colnames(H.Bayes.new.norm.for.ccle), "Non-LUAD",
+                   ifelse(df$stripped_cell_line_name %in% intersect(samples.ccle.subtype.1,colnames(H.Bayes.new.norm.for.ccle)), "S1",
+                          ifelse(df$stripped_cell_line_name %in% intersect(samples.ccle.subtype.4,colnames(H.Bayes.new.norm.for.ccle)), "S4",
+                                 ifelse(df$stripped_cell_line_name %in% intersect(samples.ccle.subtype.5,colnames(H.Bayes.new.norm.for.ccle)), "S5",
+                   "Unassigned")))))
+
+df <- df[,c("DepMap_ID","stripped_cell_line_name","group","group2",colnames(df)[!colnames(df) %in% c("DepMap_ID","stripped_cell_line_name","group","group2")])]
+
+# Known LUAD driver genes 
+
+# LUAD driver point mutations and indels
+goi <- c( 
+  sig_genes_all$gene, # in TCGA
+  setdiff(sig_genes_s4$gene, sig_genes_all$gene), # only in S4
+  setdiff(sig_genes_s5$gene, sig_genes_all$gene) # only in S5
+)
+
+# LUAD driver CNAs
+goi2 <- c("MYCL","TERC","TERT","MYC","CCND1","NKX2-1","EGFR","CDK4","CDK6","MET","KAT6A","CD274","JAK2","KRAS",
+          "MDM2","ERBB2","CCNE1","MYCL","PIK3CA","CCND3","FGFR1","WHSC1L1","BCL2L1","MAPK1","FGFR4")
+
+genes <- intersect(unique(c(goi,goi2)),colnames(df))
+
+cgc <- read.delim("./input_data/Census_allMon May 17 05_15_54 2021.tsv",sep="\t",header=TRUE, as.is=TRUE)
+genes <- intersect(genes, subset(cgc, Role.in.Cancer %in% c("oncogene","oncogene, fusion"))$Gene.Symbol) # oncogenes only
+
+library(PairedData)
+
+Pvals <- c()
+Median.gene.effect.soi <- c()
+Median.gene.effect.others <- c()
+
+for(gene in genes){
+  
+  temp <- df[,c("DepMap_ID","stripped_cell_line_name","group","group2",gene)]
+  colnames(temp) <- c("DepMap_ID","stripped_cell_line_name","group","group2","gene.effect")
+  
+  Pvals <- c(Pvals, wilcox.test(gene.effect~group,data=temp)$p.value) # wilcox.test (Subtype of interest vs. others)
+  Median.gene.effect.soi <- c(Median.gene.effect.soi, median(subset(temp,group=="Subtype of interest")$gene.effect,na.rm=TRUE))
+  Median.gene.effect.others <- c(Median.gene.effect.others, median(subset(temp,group=="Others")$gene.effect,na.rm=TRUE))
+  
+}
+
+res <- data.frame(Gene=genes,Pval=Pvals,Qval=p.adjust(Pvals,method="fdr"),
+                  Median.gene.effect.subtype.of.interest=Median.gene.effect.soi,
+                  Median.gene.effect.others=Median.gene.effect.others
+                  )
+
+res$Median.diff <- res$Median.gene.effect.subtype.of.interest - res$Median.gene.effect.others
+
+res <- res[order(res$Qval),]
+res3 <- res
+colnames(res3) <- c("Gene","P value","Q value","Median CERES scores of S3","Median CERES scores of other lung cancer cell lines","Median difference in CERES scores between S3 and other lung cancer cell lines")
+
+write.xlsx(res3,"./tables/Table.S12_CCLE_S3_vs_Others_differential_vulnerability.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+Achilles.common.essentials <- read_excel("./input_data/Achilles_common_essentials.xlsx",sheet = 1, col_names = TRUE)
+
+Achilles.common.essentials$gene <- sapply(Achilles.common.essentials$gene, function(x){
+  str_split(x," \\(")[[1]][1]
+})
+
+res2 <- subset(res, Qval<0.1 &
+                   Median.diff < -0.2 &
+                   Median.gene.effect.subtype.of.interest < -0.5 &
+                   ! Gene %in% as.character(Achilles.common.essentials$gene))
+
+res2 <- res2[order(res2$Median.gene.effect.subtype.of.interest),]
+
+#########$
+# boxplot 
+#########$
+
+sig.genes <- "CDK4"
+
+df.subtype.3 <- df[,c("group",sig.genes)]
+
+df.subtype.3$group <- ifelse(df.subtype.3$group=="Subtype of interest","Subtype 3", "Others")
+
+# Known cancer gene only
+df.subtype.3.long <- gather(df.subtype.3, Gene, CERES.score, CDK4, factor_key=TRUE)
+df.subtype.3.long.h <- df.subtype.3.long
+df.subtype.3.long.h$Gene <- factor(df.subtype.3.long.h$Gene, levels=rev(levels(df.subtype.3.long.h$Gene)))
+df.subtype.3.long.h$group[df.subtype.3.long.h$group=="Subtype 3"] <- "S3"
+df.subtype.3.long.h$group <- factor(df.subtype.3.long.h$group, levels=c("S3", "Others"))
+
+#####################################$
+# annotate S3 scores and subtype info
+
+# from the dependency dataset (n=114; n.samples.of.interest 20 + n.samples.control 94) 
+temp <- df[,c("stripped_cell_line_name","group",sig.genes)] 
+  
+# from the gene expression dataset (n=114)                    
+df2 <- df[,c("stripped_cell_line_name","group2")]
+colnames(df2)[colnames(df2)=="group2"] <- "Group"
+df2$Group[df2$Group=="Subtype of interest"] <- "S3"
+
+df.subtype.3 <- left_join(temp, df2, by=c("stripped_cell_line_name"="stripped_cell_line_name"))
+
+#####################################$
+
+df.subtype.3$group <- ifelse(df.subtype.3$group=="Subtype of interest","Subtype 3", "Others")
+
+colnames(df.subtype.3)[colnames(df.subtype.3)=="CDK4"] <- "CERES.score"
+df.subtype.3$Gene <- rep("CDK4",nrow(df.subtype.3))
+
+# Known cancer gene only
+df.subtype.3.long.h <- df.subtype.3
+df.subtype.3.long.h$group[df.subtype.3.long.h$group=="Subtype 3"] <- "S3"
+df.subtype.3.long.h$group <- factor(df.subtype.3.long.h$group, levels=c("S3", "Others"))
+
+df.subtype.3.long.h  <- df.subtype.3.long.h[complete.cases(df.subtype.3.long.h ), ]
+
+df.subtype.3.long.h$Group <- factor(df.subtype.3.long.h$Group, levels=c("Non-LUAD","S1","Unassigned","S4","S3"))
+
+
+cell.lines.for.experiments <- c("ABC1","CALU3","HCC78","HCC827","NCIH1975","HCC1833","NCIH1755","NCIH1395")
+df.subtype.3.long.h$experiments <- ifelse(df.subtype.3.long.h$stripped_cell_line_name %in% cell.lines.for.experiments,1,0)
+
+genes.to.anno <- c()
+for(i in 1:nrow(df.subtype.3.long.h)){
+  if(df.subtype.3.long.h$experiments[i]==1){
+    genes.to.anno <- c(genes.to.anno, df.subtype.3.long.h$stripped_cell_line_name[i])
+  }
+  if(df.subtype.3.long.h$experiments[i]==0){
+    genes.to.anno <- c(genes.to.anno, "")
+  }
+}
+
+df.subtype.3.long.h$genes.to.anno <- genes.to.anno 
+
+set.seed(10)
+gg <- ggplot(df.subtype.3.long.h, aes(Group, CERES.score, fill = factor(Group))) +
+  geom_boxplot(varwidth=F, alpha = 0.7, outlier.colour = c("grey60"), outlier.size=3.5, outlier.shape=NA #avoid plotting outliers twice
+               ) +
+  geom_point(position = position_jitterdodge(),  alpha = 0.3, color="grey33") +
+  scale_fill_manual(values=c(kelly()[12],kelly()[2],kelly()[17],kelly()[5],kelly()[4])) +
+  geom_hline(yintercept=-1, color = "grey", linetype="longdash") +
+  geom_hline(yintercept=-0.5, color = "grey", linetype="longdash") +
+  geom_hline(yintercept=0, color = "grey", linetype="longdash") +
+  ylim(-1.75, max(df.subtype.3.long.h$CERES.score)) +
+  xlab("Gene") +
+  ylab("CERES score") +
+  labs(fill = "Group") +
+  theme_bw(base_size = 20) + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+                     axis.text.y = element_text(face="bold.italic", color="black", angle=0),
+                     legend.position="bottom"
+                     ) + 
+  coord_flip() + 
+  geom_text_repel(
+                  data = df.subtype.3.long.h,
+                  aes(x=Group, y=CERES.score, label = genes.to.anno),
+                  size = 5,
+                  box.padding = unit(0.35, "lines"),
+                  point.padding = unit(0.3, "lines"),
+                  colour = "black",
+                  fontface = "italic"
+          )
+
+gg
+  
+####################$
+# Subtype 4 analysis
+####################$
+
+mat <- Achilles.gene.effect
+
+colnames(mat) <- sapply(colnames(mat), function(x){
+  str_split(x,"\\.")[[1]][1]
+})
+
+# Dependency data
+df <- as.data.frame(mat)
+df$DepMap_ID <- rownames(df)
+df <- df[,c("DepMap_ID",colnames(df)[colnames(df)!="DepMap_ID"])]
+
+samples.of.interest <- subset(CCLE.depMap.21Q2.sample.info.20210526, stripped_cell_line_name %in% samples.ccle.subtype.4 & DepMap_ID %in% rownames(df) )$stripped_cell_line_name # samples with both expression data and dependency data
+
+samples.control <- setdiff(subset(CCLE.depMap.21Q2.sample.info.20210526, primary_disease=="Lung Cancer" & DepMap_ID %in% rownames(df))$stripped_cell_line_name,
+                           samples.of.interest) # All other lung cancer cell lines with depmap data 
+# [note] samples.control needs to be present in the CCLE expression dataset (for cell line vulnerability analysis)
+samples.control <- intersect(samples.control,
+                             subset(CCLE.depMap.21Q2.sample.info.20210526, DepMap_ID %in% rownames(CCLE.depMap.21Q2.expression))$stripped_cell_line_name ) # All other lung cancer cell lines with both depmap data and expression data 
+
+genes <- colnames(df)[colnames(df)!="DepMap_ID"]
+
+df <- subset(df, DepMap_ID %in% subset(CCLE.depMap.21Q2.sample.info.20210526,stripped_cell_line_name %in% c(samples.of.interest,samples.control) )$DepMap_ID)
+
+df <- inner_join(CCLE.depMap.21Q2.sample.info.20210526[,c("DepMap_ID","stripped_cell_line_name")],df,by="DepMap_ID")
+
+df$group <- ifelse(df$stripped_cell_line_name %in% samples.of.interest, "Subtype of interest", "Others")
+df$group2 <- ifelse(df$stripped_cell_line_name %in% samples.of.interest, "Subtype of interest",
+                    ifelse(! df$stripped_cell_line_name %in% colnames(H.Bayes.new.norm.for.ccle), "Non-LUAD",
+                           ifelse(df$stripped_cell_line_name %in% intersect(samples.ccle.subtype.1,colnames(H.Bayes.new.norm.for.ccle)), "S1",
+                                  ifelse(df$stripped_cell_line_name %in% intersect(samples.ccle.subtype.3,colnames(H.Bayes.new.norm.for.ccle)), "S3",
+                                         ifelse(df$stripped_cell_line_name %in% intersect(samples.ccle.subtype.5,colnames(H.Bayes.new.norm.for.ccle)), "S5",
+                                                "Unassigned")))))
+
+df <- df[,c("DepMap_ID","stripped_cell_line_name","group","group2",colnames(df)[!colnames(df) %in% c("DepMap_ID","stripped_cell_line_name","group","group2")])]
+
+# df <- subset(df, group2 != "Non-LUAD")
+
+# Known LUAD driver genes 
+
+# LUAD driver point mutations and indels
+goi <- c( 
+  sig_genes_all$gene, # in TCGA
+  setdiff(sig_genes_s4$gene, sig_genes_all$gene), # only in S4
+  setdiff(sig_genes_s5$gene, sig_genes_all$gene) # only in S5
+)
+
+# LUAD driver CNAs
+goi2 <- c("MYCL","TERC","TERT","MYC","CCND1","NKX2-1","EGFR","CDK4","CDK6","MET","KAT6A","CD274","JAK2","KRAS",
+          "MDM2","ERBB2","CCNE1","MYCL","PIK3CA","CCND3","FGFR1","WHSC1L1","BCL2L1","MAPK1","FGFR4")
+
+genes <- intersect(unique(c(goi,goi2)),colnames(df))
+
+cgc <- read.delim("./input_data/Census_allMon May 17 05_15_54 2021.tsv",sep="\t",header=TRUE, as.is=TRUE)
+genes <- intersect(genes, subset(cgc, Role.in.Cancer %in% c("oncogene","oncogene, fusion"))$Gene.Symbol) # oncogenes only
+
+library(PairedData)
+
+Pvals <- c()
+Median.gene.effect.soi <- c()
+Median.gene.effect.others <- c()
+
+for(gene in genes){
+  
+  temp <- df[,c("DepMap_ID","stripped_cell_line_name","group","group2",gene)]
+  colnames(temp) <- c("DepMap_ID","stripped_cell_line_name","group","group2","gene.effect")
+  
+  Pvals <- c(Pvals, wilcox.test(gene.effect~group,data=temp)$p.value) # wilcox.test
+  Median.gene.effect.soi <- c(Median.gene.effect.soi, median(subset(temp,group=="Subtype of interest")$gene.effect,na.rm=TRUE))
+  Median.gene.effect.others <- c(Median.gene.effect.others, median(subset(temp,group=="Others")$gene.effect,na.rm=TRUE))
+  
+}
+
+res <- data.frame(Gene=genes,Pval=Pvals,Qval=p.adjust(Pvals,method="fdr"),
+                  Median.gene.effect.subtype.of.interest=Median.gene.effect.soi,
+                  Median.gene.effect.others=Median.gene.effect.others
+)
+
+res$Median.diff <- res$Median.gene.effect.subtype.of.interest - res$Median.gene.effect.others
+
+res <- res[order(res$Qval),]
+res3 <- res
+colnames(res3) <- c("Gene","P value","Q value","Median CERES scores of S4","Median CERES scores of other lung cancer cell lines","Median difference in CERES scores between S4 and other lung cancer cell lines")
+
+write.xlsx(res3,"./tables/Table.S9_CCLE_S4_vs_Others_differential_vulnerability.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+Achilles.common.essentials <- read_excel("./input_data/Achilles_common_essentials.xlsx",sheet = 1, col_names = TRUE)
+
+Achilles.common.essentials$gene <- sapply(Achilles.common.essentials$gene, function(x){
+  str_split(x," \\(")[[1]][1]
+})
+
+res2 <- subset(res, Qval<0.1 &
+                 Median.diff < -0.2 &
+                 Median.gene.effect.subtype.of.interest < -0.5 &
+                 ! Gene %in% as.character(Achilles.common.essentials$gene))
+
+res2 <- res2[order(res2$Median.gene.effect.subtype.of.interest),]
+
+#########$
+# boxplot 
+#########$
+
+# (1) CDK6
+
+sig.genes <- "CDK6"
+
+df.subtype.4 <- df[,c("group",sig.genes)]
+
+df.subtype.4$group <- ifelse(df.subtype.4$group=="Subtype of interest","Subtype 4", "Others")
+
+# Known cancer gene only
+df.subtype.4.long <- gather(df.subtype.4, Gene, CERES.score, CDK6, factor_key=TRUE)
+df.subtype.4.long.h <- df.subtype.4.long
+df.subtype.4.long.h$Gene <- factor(df.subtype.4.long.h$Gene, levels=rev(levels(df.subtype.4.long.h$Gene)))
+df.subtype.4.long.h$group[df.subtype.4.long.h$group=="Subtype 4"] <- "S4"
+df.subtype.4.long.h$group <- factor(df.subtype.4.long.h$group, levels=c("S4", "Others"))
+
+#####################################$
+# annotate S4 scores and subtype info
+
+# from the dependency dataset (n=114; n.samples.of.interest 10 + n.samples.control 104) 
+temp <- df[,c("stripped_cell_line_name","group",sig.genes)] 
+
+# from the gene expression dataset (n=114)                    
+df2 <- df[,c("stripped_cell_line_name","group2")]
+colnames(df2)[colnames(df2)=="group2"] <- "Group"
+df2$Group[df2$Group=="Subtype of interest"] <- "S4"
+
+df.subtype.4 <- left_join(temp, df2, by=c("stripped_cell_line_name"="stripped_cell_line_name"))
+
+#####################################$
+
+df.subtype.4$group <- ifelse(df.subtype.4$group=="Subtype of interest","Subtype 4", "Others")
+
+colnames(df.subtype.4)[colnames(df.subtype.4)=="CDK6"] <- "CERES.score"
+df.subtype.4$Gene <- rep("CDK6",nrow(df.subtype.4))
+
+# Known cancer gene only
+df.subtype.4.long.h <- df.subtype.4
+df.subtype.4.long.h$group[df.subtype.4.long.h$group=="Subtype 4"] <- "S4"
+df.subtype.4.long.h$group <- factor(df.subtype.4.long.h$group, levels=c("S4", "Others"))
+
+df.subtype.4.long.h  <- df.subtype.4.long.h[complete.cases(df.subtype.4.long.h ), ]
+
+df.subtype.4.long.h$Group <- factor(df.subtype.4.long.h$Group, levels=c("Non-LUAD","S1","Unassigned","S3","S4"))
+
+cell.lines.for.experiments <- c("ABC1","CALU3","HCC78","HCC827","NCIH1975","HCC1833","NCIH1755","NCIH1395")
+df.subtype.4.long.h$experiments <- ifelse(df.subtype.4.long.h$stripped_cell_line_name %in% cell.lines.for.experiments,1,0)
+
+genes.to.anno <- c()
+for(i in 1:nrow(df.subtype.4.long.h)){
+  if(df.subtype.4.long.h$experiments[i]==1){
+    genes.to.anno <- c(genes.to.anno, df.subtype.4.long.h$stripped_cell_line_name[i])
+  }
+  if(df.subtype.4.long.h$experiments[i]==0){
+    genes.to.anno <- c(genes.to.anno, "")
+  }
+}
+
+df.subtype.4.long.h$genes.to.anno <- genes.to.anno 
+
+df.subtype.4.long.h <- subset(df.subtype.4.long.h, Group != "S1") # remove S1
+
+set.seed(10)
+gg <- ggplot(df.subtype.4.long.h, aes(Group, CERES.score, fill = factor(Group))) +
+  geom_boxplot(varwidth=F, alpha = 0.7, outlier.colour = c("grey60"), outlier.size=3.5, outlier.shape=NA #avoid plotting outliers twice
+  ) +
+  geom_point(position = position_jitterdodge(),  alpha = 0.3, color="grey33") +
+  scale_fill_manual(values=c(kelly()[12],kelly()[17],kelly()[4],kelly()[5])) +
+  geom_hline(yintercept=-1, color = "grey", linetype="longdash") +
+  geom_hline(yintercept=-0.5, color = "grey", linetype="longdash") +
+  geom_hline(yintercept=0, color = "grey", linetype="longdash") +
+  ylim(-1.75, max(df.subtype.4.long.h$CERES.score)) +
+  xlab("") +
+  ylab("CERES score") +
+  labs(fill = "Group") +
+  theme_bw(base_size = 20) + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+        axis.text.y = element_text(face="bold.italic", color="black", angle=0),
+        legend.position="bottom"
+  ) + 
+  coord_flip() 
+
+gg
+
+# Fig.2B
+pdf(file="./figures/Fig.2B_CERES.scores.S4.vs.Others_CDK6.pdf",width=9,height=5)
+
+gg
+
+dev.off()
+
+# 
+
+wilcox.test(CDK6 ~ group, data=df) # p-value = 0.001421
+wilcox.test(CDK6 ~ group, data=subset(df,group2 != "Non-LUAD")) # p-value = 0.003199
+
+# (2) CCND3
+
+sig.genes <- "CCND3"
+
+df.subtype.4 <- df[,c("group",sig.genes)]
+
+df.subtype.4$group <- ifelse(df.subtype.4$group=="Subtype of interest","Subtype 4", "Others")
+
+# Known cancer gene only
+df.subtype.4.long <- gather(df.subtype.4, Gene, CERES.score, CCND3, factor_key=TRUE)
+df.subtype.4.long.h <- df.subtype.4.long
+df.subtype.4.long.h$Gene <- factor(df.subtype.4.long.h$Gene, levels=rev(levels(df.subtype.4.long.h$Gene)))
+df.subtype.4.long.h$group[df.subtype.4.long.h$group=="Subtype 4"] <- "S4"
+df.subtype.4.long.h$group <- factor(df.subtype.4.long.h$group, levels=c("S4", "Others"))
+
+#####################################$
+# annotate S4 scores and subtype info
+
+# from the dependency dataset (n=114; n.samples.of.interest 10 + n.samples.control 104) 
+temp <- df[,c("stripped_cell_line_name","group",sig.genes)] 
+
+# from the gene expression dataset (n=114)                    
+df2 <- df[,c("stripped_cell_line_name","group2")]
+colnames(df2)[colnames(df2)=="group2"] <- "Group"
+df2$Group[df2$Group=="Subtype of interest"] <- "S4"
+
+df.subtype.4 <- left_join(temp, df2, by=c("stripped_cell_line_name"="stripped_cell_line_name"))
+
+#####################################$
+
+df.subtype.4$group <- ifelse(df.subtype.4$group=="Subtype of interest","Subtype 4", "Others")
+
+colnames(df.subtype.4)[colnames(df.subtype.4)=="CCND3"] <- "CERES.score"
+df.subtype.4$Gene <- rep("CCND3",nrow(df.subtype.4))
+
+# Known cancer gene only
+df.subtype.4.long.h <- df.subtype.4
+df.subtype.4.long.h$group[df.subtype.4.long.h$group=="Subtype 4"] <- "S4"
+df.subtype.4.long.h$group <- factor(df.subtype.4.long.h$group, levels=c("S4", "Others"))
+
+df.subtype.4.long.h  <- df.subtype.4.long.h[complete.cases(df.subtype.4.long.h ), ]
+
+df.subtype.4.long.h$Group <- factor(df.subtype.4.long.h$Group, levels=c("Non-LUAD","S1","Unassigned","S3","S4"))
+
+cell.lines.for.experiments <- c("ABC1","CALU3","HCC78","HCC827","NCIH1975","HCC1833","NCIH1755","NCIH1395")
+df.subtype.4.long.h$experiments <- ifelse(df.subtype.4.long.h$stripped_cell_line_name %in% cell.lines.for.experiments,1,0)
+
+genes.to.anno <- c()
+for(i in 1:nrow(df.subtype.4.long.h)){
+  if(df.subtype.4.long.h$experiments[i]==1){
+    genes.to.anno <- c(genes.to.anno, df.subtype.4.long.h$stripped_cell_line_name[i])
+  }
+  if(df.subtype.4.long.h$experiments[i]==0){
+    genes.to.anno <- c(genes.to.anno, "")
+  }
+}
+
+df.subtype.4.long.h$genes.to.anno <- genes.to.anno 
+
+df.subtype.4.long.h <- subset(df.subtype.4.long.h, Group != "S1") # remove S1
+
+set.seed(10)
+gg <- ggplot(df.subtype.4.long.h, aes(Group, CERES.score, fill = factor(Group))) +
+  geom_boxplot(varwidth=F, alpha = 0.7, outlier.colour = c("grey60"), outlier.size=3.5, outlier.shape=NA #avoid plotting outliers twice
+  ) +
+  geom_point(position = position_jitterdodge(),  alpha = 0.3, color="grey33") +
+  scale_fill_manual(values=c(kelly()[12],kelly()[17],kelly()[4],kelly()[5])) +
+  geom_hline(yintercept=-1, color = "grey", linetype="longdash") +
+  geom_hline(yintercept=-0.5, color = "grey", linetype="longdash") +
+  geom_hline(yintercept=0, color = "grey", linetype="longdash") +
+  ylim(-1.75, max(df.subtype.4.long.h$CERES.score)) +
+  xlab("") +
+  ylab("CERES score") +
+  labs(fill = "Group") +
+  theme_bw(base_size = 20) + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+        axis.text.y = element_text(face="bold.italic", color="black", angle=0),
+        legend.position="bottom"
+  ) + 
+  coord_flip() 
+
+gg
+
+# Fig.2B
+pdf(file="./figures/Fig.2B_CERES.scores.S4.vs.Others_CCND3.pdf",width=9,height=5)
+
+gg
+
+dev.off()
+
+#
+
+wilcox.test(CCND3 ~ group, data=df) 
+wilcox.test(CCND3 ~ group, data=subset(df,group2 != "Non-LUAD")) 
+
+
+```
+

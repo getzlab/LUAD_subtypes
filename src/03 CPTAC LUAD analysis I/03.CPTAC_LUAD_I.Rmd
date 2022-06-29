@@ -1,0 +1,1479 @@
+---
+title: "Roh, Geffen, Cha et al. 03 CPTAC LUAD analysis I"
+output: html_notebook
+---
+
+###### Projection to CPTAC LUAD
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+#############################$
+# Load CPTAC LUAD TPM data
+#############################$
+
+# Sample annotation
+
+CPTAC.LUAD.anno <- read.delim("./input_data/CPTAC_LUAD/LUAD_samples.tsv", sep="\t", header=TRUE, as.is=TRUE)
+
+CPTAC.LUAD.anno <- subset(CPTAC.LUAD.anno, ! submitter_id %in% c("C3N-00545-01","C3N-00545-03")) # excluded due to sample quality
+
+CPTAC.LUAD.tumor.anno <- subset(CPTAC.LUAD.anno, tissue_type == "Tumor")
+
+df <- read_excel("./input_data/CPTAC_LUAD/sample-subtype_membership_cutoff0.7.with.submitter_id_mod.xlsx",sheet = 1, col_names = TRUE)
+df <- subset(df, ! submitter_id %in% c("C3N-00545-01","C3N-00545-03")) # excluded due to sample quality
+
+CPTAC.LUAD.tumor.anno <- inner_join(CPTAC.LUAD.tumor.anno[,c("sample_id","submitter_id")], df[,c("submitter_id_modified","submitter_id","Sample","Subtype")], by=c("submitter_id"="submitter_id"))
+
+CPTAC.LUAD.tumor.anno$Subtype[CPTAC.LUAD.tumor.anno$Subtype=="G1"] <- "S1"
+CPTAC.LUAD.tumor.anno$Subtype[CPTAC.LUAD.tumor.anno$Subtype=="G2"] <- "S2"
+CPTAC.LUAD.tumor.anno$Subtype[CPTAC.LUAD.tumor.anno$Subtype=="G3"] <- "S3"
+CPTAC.LUAD.tumor.anno$Subtype[CPTAC.LUAD.tumor.anno$Subtype=="G4"] <- "S4"
+CPTAC.LUAD.tumor.anno$Subtype[CPTAC.LUAD.tumor.anno$Subtype=="G5"] <- "S5"
+CPTAC.LUAD.tumor.anno$Subtype[CPTAC.LUAD.tumor.anno$Subtype=="NA"] <- "Unassigned"
+
+# "protein coding genes" only
+
+protein.coding.genes <- as.character(subset(genecode,Gene.Type=="protein_coding")$Gene)  
+
+# Expression data
+
+CPTAC.LUAD <- read.delim("./input_data/CPTAC_LUAD/LUAD.rnaseqc_tpm.gct", sep="\t", header=FALSE, as.is=TRUE)
+
+CPTAC.LUAD <- CPTAC.LUAD[3:nrow(CPTAC.LUAD),]
+colnames(CPTAC.LUAD) <- CPTAC.LUAD[1,]
+CPTAC.LUAD <- CPTAC.LUAD[2:nrow(CPTAC.LUAD),]
+
+temp <- CPTAC.LUAD$Description
+
+CPTAC.LUAD <- CPTAC.LUAD[,colnames(CPTAC.LUAD)[!colnames(CPTAC.LUAD) %in% c("Name","Description")]]
+
+CPTAC.LUAD <- as.matrix(sapply(CPTAC.LUAD, as.numeric))
+rownames(CPTAC.LUAD) <- temp
+
+CPTAC.LUAD.all <- CPTAC.LUAD[protein.coding.genes,]
+CPTAC.LUAD <- CPTAC.LUAD[protein.coding.genes, subset(CPTAC.LUAD.anno, tissue_type=="Tumor")$sample_id]
+
+######### projection to CPTAC LUAD
+
+OUTPUT_CPTAC <- "./input_data/OUTPUT_CPTAC/"
+
+system('mkdir -p ./input_data/OUTPUT_CPTAC')
+
+source("./src/get.marker_for_fold.ver2.WR.R")
+marker0 <- sapply(marker0,function(x) strsplit(x,"\\|")[[1]][1])
+marker0.original <- marker0
+
+cohort <- "LUAD-Tumor"
+expr <- CPTAC.LUAD
+
+genecode.protein_coding <- subset(genecode,Gene.Type=="protein_coding")
+rownames(expr) <- paste(genecode.protein_coding$Gene[match(rownames(expr),genecode.protein_coding$Gene.id,nomatch=0)],rownames(expr),sep="_")
+
+index.NA <- rowSums(is.na(expr))<= round(cut.NA*ncol(expr))
+expr <- expr[index.NA,]
+expr.fold <- t(apply(expr,1,function(x) x-median(x,na.rm=T)))
+expr.fold[is.na(expr.fold)] <- 0
+expr.fold.up <- apply(expr.fold,2,function(x) ifelse(x>0,x,0))
+rownames(W1) <- sapply(rownames(W1),function(x) strsplit(x,"[|]")[[1]][1])
+for (i in 1:1) {
+    gene.expr <- sapply(rownames(expr.fold),function(x) strsplit(x,"_")[[1]][2])
+    marker0 <- rownames(expr.fold)[gene.expr%in%marker0.original] 
+    gene.marker0 <- sapply(marker0,function(x) strsplit(x,"_")[[1]][2]) 
+    W1.new <- W1[match(gene.marker0,rownames(W1),nomatch=0),]
+    rownames(W1.new) <- marker0
+    expr.fold.marker <- expr.fold[match(marker0,rownames(expr.fold),nomatch=0),]
+    x <- get.SSEC.fold.short(expr,expr.fold,expr.fold.up,cohort,marker0,W1.new)
+    g.Bayes.new <- x[[1]]
+    H.Bayes.new <- x[[2]]
+    colnames(H.Bayes.new) <- names(g.Bayes.new)
+    save(H.Bayes.new,file=paste(OUTPUT_CPTAC,paste(cohort,"H.Bayes.RData",sep="."),sep=""))
+}
+
+```
+
+
+###### Heatmaps for H matrix, GSVA, and marker gene expression 
+
+```{r fig.height=21, fig.width=34}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+load(file=paste(OUTPUT_CPTAC,paste(cohort,"H.Bayes.RData",sep="."),sep=""))
+
+# Plot heatmap of association between CCLE cell lines and TCGA subtypes
+
+H.Bayes.new.norm <- apply(H.Bayes.new,2,function(x) x/sum(x))
+
+library(ComplexHeatmap)
+
+# row scaled data
+hm <- Heatmap(H.Bayes.new.norm, 
+        name = "Normalized Association of CPTAC LUAD to TCGA LUAD Subtypes", #title of legend
+        column_title = "CPTAC LUAD samples", 
+        row_title = "TCGA expression subtypes",
+        row_names_gp = gpar(fontsize = 11), # Text size for row names
+        row_names_side = "left",
+        rect_gp = gpar(col= "white"), # "graphic parameters for drawing rectangles (for heatmap body)"
+        cluster_columns = TRUE,
+        cluster_rows = FALSE,
+        show_column_names = TRUE,
+        show_row_names = TRUE,
+        show_column_dend = FALSE,
+        show_row_dend = FALSE,
+        height = unit(250, "mm"),
+        width = unit(3000, "mm"),
+        column_title_side = "top",
+        column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+        heatmap_legend_param = list(legend_direction = "horizontal",
+                                  legend_width = unit(5, "cm"), title_position = "topcenter")
+        )
+
+samples <- as.character(colnames(H.Bayes.new.norm)[column_order(hm)])
+
+res <- H.Bayes.new.norm[,samples]
+
+# Save sample-subtype membership information ("H.Bayes.new.norm")
+df <- as.data.frame(t(H.Bayes.new.norm))
+colnames(df) <- c("S1","S2","S3","S4","S5")
+df$Samples <- rownames(df)
+
+samples.cptac.subtype.1 <- names(H.Bayes.new.norm["G1",][H.Bayes.new.norm["G1",]>0.6])
+samples.cptac.subtype.2 <- names(H.Bayes.new.norm["G2",][H.Bayes.new.norm["G2",]>0.6])
+samples.cptac.subtype.3 <- names(H.Bayes.new.norm["G3",][H.Bayes.new.norm["G3",]>0.6])
+samples.cptac.subtype.4 <- names(H.Bayes.new.norm["G4",][H.Bayes.new.norm["G4",]>0.6])
+samples.cptac.subtype.5 <- names(H.Bayes.new.norm["G5",][H.Bayes.new.norm["G5",]>0.6])
+
+df$Subtypes <- ifelse(df$Samples %in% samples.cptac.subtype.1, "S1",
+                      ifelse(df$Samples %in% samples.cptac.subtype.2, "S2",
+                             ifelse(df$Samples %in% samples.cptac.subtype.3, "S3",
+                                    ifelse(df$Samples %in% samples.cptac.subtype.4, "S4", 
+                                           ifelse(df$Samples %in% samples.cptac.subtype.5, "S5", "Unassigned"
+                      )))))
+
+df <- df[,c("Samples","Subtypes","S1","S2","S3","S4","S5")]
+
+df <- inner_join(CPTAC.LUAD.anno[,c("sample_id","submitter_id")], df, by=c("sample_id"="Samples"))
+
+df <- df[,c("submitter_id","Subtypes","S1","S2","S3","S4","S5")]
+colnames(df)[colnames(df)=="submitter_id"] <- "Samples"
+
+df <- df[order(df$Subtypes),]
+
+
+#
+
+df2 <- read_excel("./input_data/CPTAC_LUAD/sample-subtype_membership_cutoff0.7.with.submitter_id_mod.xlsx",sheet = 1, col_names = TRUE)
+
+df <- inner_join(df2[,c("submitter_id_modified","submitter_id")], df, by=c("submitter_id"="Samples"))
+
+df <- df[order(df$Subtypes),]
+df <- df[,c("submitter_id",colnames(df)[colnames(df)!="submitter_id"])]
+
+write.xlsx(df,"./tables/Table.S11_Sample_Subtype_membership_for_CPTAC_LUAD.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+#####################$
+# Sorted by subtypes
+
+samples <- colnames(H.Bayes.new.norm)
+
+samples.cptac.subtype.1 <- names(H.Bayes.new.norm["G1",][H.Bayes.new.norm["G1",]>0.6])
+samples.cptac.subtype.2 <- names(H.Bayes.new.norm["G2",][H.Bayes.new.norm["G2",]>0.6])
+samples.cptac.subtype.3 <- names(H.Bayes.new.norm["G3",][H.Bayes.new.norm["G3",]>0.6])
+samples.cptac.subtype.4 <- names(H.Bayes.new.norm["G4",][H.Bayes.new.norm["G4",]>0.6])
+samples.cptac.subtype.5 <- names(H.Bayes.new.norm["G5",][H.Bayes.new.norm["G5",]>0.6])
+
+sample.order <- c(samples.cptac.subtype.1,samples.cptac.subtype.2,samples.cptac.subtype.3,samples.cptac.subtype.4,samples.cptac.subtype.5,
+                  setdiff(samples,c(samples.cptac.subtype.1,samples.cptac.subtype.2,samples.cptac.subtype.3,samples.cptac.subtype.4,samples.cptac.subtype.5)))
+
+mat <- H.Bayes.new.norm[,sample.order]
+rownames(mat) <- c("S1","S2","S3","S4","S5")
+
+samples <- sample.order
+
+subtypes <- ifelse(samples %in% samples.cptac.subtype.1,"S1", 
+                   ifelse(samples %in% samples.cptac.subtype.2,"S2", 
+                     ifelse(samples %in% samples.cptac.subtype.3,"S3", 
+                            ifelse(samples %in% samples.cptac.subtype.4,"S4", 
+                                  ifelse(samples %in% samples.cptac.subtype.5,"S5","Unassigned")))))
+
+# sample-subtype membership 
+
+memrship.cutoff <- 0.6
+
+membership <- c()
+for(x in colnames(res)){
+
+  if( sum((res[,x] > memrship.cutoff) == TRUE) == 0 ){
+    membership <- c(membership,NA)
+  } else{
+    membership <- c(membership,names(which((res[,x] > memrship.cutoff) == TRUE)))
+  }
+
+}
+
+table(membership)
+
+names(membership) <- colnames(res)
+
+df.membership <- data.frame(Sample=names(membership), Subtype=as.character(membership))
+
+# GSVA analysis 
+
+library(GSVA)
+
+gmt.file <- "./input_data/h.all.v6.1.symbols.gmt"
+
+pathways <- gmtPathways(gmt.file)
+
+set.seed(10)
+
+cptac_luad_gsva <- gsva(CPTAC.LUAD,  pathways, method="gsva", mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+
+cptac_luad_gsva <- cptac_luad_gsva[row.sets.from.tcga.gsva, samples]
+
+# Add heatmaps
+
+rownames(H.Bayes.new.norm) <- c("S1","S2","S3","S4","S5")
+
+library(ComplexHeatmap)
+
+# (1) sample - subypte membership heatmap
+hm1 <- Heatmap(H.Bayes.new.norm[,samples], 
+        name = "Normalized Association of \n CPTAC LUAD to \n TCGA LUAD Subtypes", #title of legend
+        column_title = "CPTAC LUAD samples", 
+        row_title = "TCGA expression subtypes",
+        row_names_gp = gpar(fontsize = 11), # Text size for row names
+        row_names_side = "left",
+        rect_gp = gpar(col= "white"), # "graphic parameters for drawing rectangles (for heatmap body)"
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        show_column_names = FALSE,
+        show_row_names = TRUE,
+        show_column_dend = FALSE,
+        show_row_dend = FALSE,
+        width = unit(600, "mm"),
+        height = unit(40, "mm"),
+        column_title_side = "top",
+        column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+        heatmap_legend_param = list(
+                                  legend_direction = "horizontal",
+                                  #legend_width = unit(5, "cm"), 
+                                  #title_position = "topcenter",
+                                  title_gp = gpar(fontsize = 15, fontface = "bold"),
+                                  labels_gp = gpar(fontsize = 15)
+                                  )
+        )
+
+# (2) GSVA heatmap + subtype annotation
+
+all_gsva.soi <- cptac_luad_gsva
+
+all_gsva.soi.scaled <- t(scale(t(all_gsva.soi))) # do not run this code if there is only one gene set!!!
+
+library(ComplexHeatmap)
+library(pals)
+
+subtypes <- ifelse(samples %in% as.character(subset(df.membership,Subtype=="G1")$Sample),"S1", 
+                 ifelse(samples %in% as.character(subset(df.membership,Subtype=="G2")$Sample),"S2", 
+                        ifelse(samples %in% as.character(subset(df.membership,Subtype=="G3")$Sample),"S3", 
+                              ifelse(samples %in% as.character(subset(df.membership,Subtype=="G4")$Sample),"S4",
+                                     ifelse(samples %in% as.character(subset(df.membership,Subtype=="G5")$Sample),"S5","Unassigned")))))
+
+col2 = c("S1" = kelly()[2],
+         "S2" = kelly()[3],
+         "S3" = kelly()[4],
+         "S4" = kelly()[5],
+         "S5" = kelly()[6],
+         "Unassigned" = "grey")
+  
+subtypes2 <- subtypes
+names(subtypes2) <- samples
+
+hm2 <- Heatmap(rbind(subtype = subtypes2), name = "Subtype", col = col2,
+               width = unit(600, "mm"),
+               height = unit(10, "mm"),
+               row_names_gp = gpar(fontsize = 15), # Text size for row names
+               column_names_gp = gpar(fontsize = 15), # Text size for column names
+               column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+               row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+               heatmap_legend_param = list(
+                            title_gp = gpar(fontsize = 15, fontface = "bold"),
+                            labels_gp = gpar(fontsize = 13))
+               )
+
+set.seed(5)
+hm3 <- Heatmap(all_gsva.soi.scaled[row.sets.from.tcga.gsva,samples], 
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = FALSE,
+              show_heatmap_legend = TRUE,
+              row_names_gp = gpar(fontsize = 15), # Text size for row names
+              column_names_gp = gpar(fontsize = 15), # Text size for column names
+              name = "Row z-scores of GSVA enrichment scores", 
+              column_title = "Samples", row_title = "Gene sets",
+              width = unit(600, "mm"),
+              height = unit(250, "mm"),
+              column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+              row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+              heatmap_legend_param = list(
+                                  title_gp = gpar(fontsize = 15, fontface = "bold"),
+                                  labels_gp = gpar(fontsize = 15))
+        )
+
+# (3) marker gene expression 
+
+expression <- CPTAC.LUAD[intersect(gene3,rownames(CPTAC.LUAD)),samples]
+expression.scaled <- t(scale(t(expression)))
+
+f1 = colorRamp2(seq(-1, 2, length = 3), c("blue", "#EEEEEE", "red"))
+
+hm.g3 <-  Heatmap(expression.scaled,
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = FALSE,
+                  show_column_names = FALSE,
+                  show_heatmap_legend = TRUE,
+                  row_names_gp = gpar(fontsize = 15), # Text size for row names
+                  column_names_gp = gpar(fontsize = 15), # Text size for column names
+                  name = "Row-z score of marker gene expression in S3 (TPM)", 
+                  column_title = "Samples", row_title = "S3 markers",
+                  column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+                  row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+                  width = unit(600, "mm"),
+                  height = unit(30, "mm"),
+                  heatmap_legend_param = list(
+                            title_gp = gpar(fontsize = 15, fontface = "bold"),
+                            labels_gp = gpar(fontsize = 15)),
+                  col = f1
+        )
+
+expression <- CPTAC.LUAD[intersect(gene4,rownames(CPTAC.LUAD)),samples]
+expression.scaled <- t(scale(t(expression)))
+
+hm.g4 <-  Heatmap(expression.scaled,
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = FALSE,
+                  show_column_names = FALSE,
+                  show_heatmap_legend = TRUE,
+                  row_names_gp = gpar(fontsize = 15), # Text size for row names
+                  column_names_gp = gpar(fontsize = 15), # Text size for column names
+                  name = "Row-z score of marker gene expression in S4 (TPM)", 
+                  column_title = "Samples", row_title = "S4 markers",
+                  column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+                  row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+                  width = unit(600, "mm"),
+                  height = unit(30, "mm"),
+                  heatmap_legend_param = list(
+                            title_gp = gpar(fontsize = 15, fontface = "bold"),
+                            labels_gp = gpar(fontsize = 15)),
+                  col = f1
+        )
+
+expression <- CPTAC.LUAD[intersect(gene5,rownames(CPTAC.LUAD)),samples]
+expression.scaled <- t(scale(t(expression)))
+
+hm.g5 <-  Heatmap(expression.scaled,
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = FALSE,
+                  show_column_names = FALSE,
+                  show_heatmap_legend = TRUE,
+                  row_names_gp = gpar(fontsize = 15), # Text size for row names
+                  column_names_gp = gpar(fontsize = 15), # Text size for column names
+                  name = "Row-z score of marker gene expression in S5 (TPM)", 
+                  column_title = "Samples", row_title = "S5 markers",
+                  column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+                  row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+                  width = unit(600, "mm"),
+                  height = unit(30, "mm"),
+                  heatmap_legend_param = list(
+                            title_gp = gpar(fontsize = 15, fontface = "bold"),
+                            labels_gp = gpar(fontsize = 15)),
+                  col = f1
+        )
+
+ht_list = hm1 %v% hm2 %v% hm3 %v% hm.g3 %v% hm.g4 %v% hm.g5
+
+draw(ht_list, heatmap_legend_side = "bottom")
+
+pdf(file="./figures/Fig.3A_CPTAC_integrative_heatmap.pdf",width=34,height=21)
+
+draw(ht_list, heatmap_legend_side = "bottom")
+
+dev.off()
+
+```
+
+
+###### Data prep for MutSig2CV and GISTIC
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# (1) MAF files
+
+cptac.maf.snp <- read.delim("./input_data/CPTAC3-LUAD.final_analysis_set.maf", sep="\t", header=TRUE, as.is=TRUE)
+
+cptac.g.Bayes <- inner_join(df.membership, CPTAC.LUAD.anno[,c("sample_id","submitter_id")], by=c("Sample"="sample_id"))
+
+cptac.g.Bayes$Patient <- sapply(cptac.g.Bayes$submitter_id, function(x){
+  paste(str_split(str_split(x,"__")[[1]],"-")[[1]][1:2],collapse="-")
+})
+
+cptac.maf.snp$Patient <- unlist(lapply(cptac.maf.snp$Tumor_Sample_Barcode, function(x) strsplit(x,"_")[[1]][1]))
+
+# change column names
+colnames(cptac.maf.snp)[colnames(cptac.maf.snp)=="End_position"] <- "End_Position"
+colnames(cptac.maf.snp)[colnames(cptac.maf.snp)=="Gene"] <- "gene"
+
+cptac.maf.snp.subtype.3 <- subset(cptac.maf.snp, Patient %in% subset(cptac.g.Bayes,Subtype=="G3")$Patient)
+cptac.maf.snp.subtype.4 <- subset(cptac.maf.snp, Patient %in% subset(cptac.g.Bayes,Subtype=="G4")$Patient)
+cptac.maf.snp.subtype.5 <- subset(cptac.maf.snp, Patient %in% subset(cptac.g.Bayes,Subtype=="G5")$Patient)
+
+cptac.maf.snp.subtype.3 <- cptac.maf.snp.subtype.3[,colnames(cptac.maf.snp.subtype.3)[! colnames(cptac.maf.snp.subtype.3) %in% c("gene","patient","Patient")]]
+cptac.maf.snp.subtype.4 <- cptac.maf.snp.subtype.4[,colnames(cptac.maf.snp.subtype.4)[!
+colnames(cptac.maf.snp.subtype.4) %in% c("gene","patient","Patient")]]
+cptac.maf.snp.subtype.5 <- cptac.maf.snp.subtype.5[,colnames(cptac.maf.snp.subtype.5)[!
+colnames(cptac.maf.snp.subtype.5) %in% c("gene","patient","Patient")]]
+
+cptac.maf.snp.subtype.3 <- cptac.maf.snp.subtype.3[,intersect(colnames(cptac.maf.snp.subtype.3),colnames(maf.snp.subtype.1))]
+cptac.maf.snp.subtype.4 <- cptac.maf.snp.subtype.4[,intersect(colnames(cptac.maf.snp.subtype.4),colnames(maf.snp.subtype.1))]
+cptac.maf.snp.subtype.5 <- cptac.maf.snp.subtype.5[,intersect(colnames(cptac.maf.snp.subtype.5),colnames(maf.snp.subtype.1))]
+
+system('mkdir -p ./tables/CPTAC_LUAD_maf_files_by_subtypes')
+
+write.table(cptac.maf.snp.subtype.3,"./tables/CPTAC_LUAD_maf_files_by_subtypes/LUAD.cptac.maf.snp.subtype.3.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(cptac.maf.snp.subtype.4,"./tables/CPTAC_LUAD_maf_files_by_subtypes/LUAD.cptac.maf.snp.subtype.4.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+write.table(cptac.maf.snp.subtype.5,"./tables/CPTAC_LUAD_maf_files_by_subtypes/LUAD.cptac.maf.snp.subtype.5.maf",sep="\t",row.names=FALSE, quote=FALSE, col.names = TRUE)
+
+# (2) Seg files
+
+## The seg files are located under "./tables/CPTAC_LUAD_seg_files_by_subtypes"
+
+```
+
+
+###### Subtype concordance for CPTAC samples (TCGA vs. BayesNMF vs. CPTAC multi-omics clusters)
+
+```{r fig.height=6, fig.width=12}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+CPTAC.LUAD.tumor.anno$submitter_id.2 <- CPTAC.LUAD.tumor.anno$submitter_id 
+CPTAC.LUAD.tumor.anno$submitter_id.2[CPTAC.LUAD.tumor.anno$submitter_id.2=="5a84eae1-197e-4463-ad65-59becc"] <- "X11LU022"
+CPTAC.LUAD.tumor.anno$submitter_id.2[CPTAC.LUAD.tumor.anno$submitter_id.2=="9f905736-f662-41d6-b3ac-16758d"] <- "X11LU013"
+CPTAC.LUAD.tumor.anno$submitter_id.2[CPTAC.LUAD.tumor.anno$submitter_id.2=="93e30fd5-e57e-4503-a175-863c7d"] <- "X11LU016"
+CPTAC.LUAD.tumor.anno$submitter_id.2[CPTAC.LUAD.tumor.anno$submitter_id.2=="2f2e5477-42a4-4906-a943-bf7f80"] <- "X11LU035"
+
+cptac.g.Bayes.2 <- inner_join(df.membership, CPTAC.LUAD.tumor.anno[,c("sample_id","submitter_id.2")], by=c("Sample"="sample_id"))
+
+cptac.g.Bayes.2$Patient <- sapply(cptac.g.Bayes.2$submitter_id, function(x){
+  paste(str_split(str_split(x,"__")[[1]],"-")[[1]][1:2],collapse="-")
+})
+
+cptac.g.Bayes.2$Patient[cptac.g.Bayes.2$Patient=="X11LU013-NA"] <- "X11LU013"
+cptac.g.Bayes.2$Patient[cptac.g.Bayes.2$Patient=="X11LU016-NA"] <- "X11LU016"
+cptac.g.Bayes.2$Patient[cptac.g.Bayes.2$Patient=="X11LU022-NA"] <- "X11LU022"
+cptac.g.Bayes.2$Patient[cptac.g.Bayes.2$Patient=="X11LU035-NA"] <- "X11LU035"
+
+cptac.g.Bayes.2$Tumor_Sample_Barcode <- paste0(cptac.g.Bayes.2$Patient,"_T")
+
+#
+
+CPTAC.LUAD.cell.suppl <- read_excel("./input_data/CPTAC_LUAD_cell_paper_suppl.xlsx", sheet="Annotions_S1A")
+
+df <- subset(CPTAC.LUAD.cell.suppl, Type=="Tumor")[,c("Sample.ID","Age","Smoking.Status","Smoking.Score.WGS","Smoking.Signature.Fraction.WGS","NMF.consensus","mRNA.Expression.Subtype.TCGA","mRNA.stemness.index","ESTIMATE ImmuneScore","ESTIMATE StromalScore")]
+
+df$Sample.ID <- sapply(df$Sample.ID,function(x){
+  paste0(paste(c(str_split(x,"\\.")[[1]]),collapse="-"),"_T")
+})
+
+df <- subset(df, ! Sample.ID %in% c("C3N-02587-1_T","C3N-02379-1_T", # remove sample names from additional tumors from the same patients 
+                                    "C3N-00545_T" # excluded due to sample quality
+                                    )) 
+
+
+df <- subset(df, Sample.ID %in% cptac.g.Bayes.2$Tumor_Sample_Barcode)
+df <- data.frame(df)
+
+df <- inner_join(cptac.g.Bayes.2[,c("Tumor_Sample_Barcode","Subtype")],df,by=c("Tumor_Sample_Barcode"="Sample.ID"))
+
+df <- df[,c("Tumor_Sample_Barcode","Subtype","NMF.consensus","mRNA.Expression.Subtype.TCGA")]
+
+####$
+
+df2 <- CPTAC.LUAD.tumor.anno
+
+df2$submitter_id <- sapply(df2$submitter_id.2, function(x){
+  paste0(paste0(str_split(str_split(x,"_")[[1]][1],"-")[[1]][1:2],collapse="-"),"_T")
+})
+
+df2$submitter_id[df2$submitter_id=="X11LU013-NA_T"] <- "X11LU013_T"
+df2$submitter_id[df2$submitter_id=="X11LU016-NA_T"] <- "X11LU016_T"
+df2$submitter_id[df2$submitter_id=="X11LU022-NA_T"] <- "X11LU022_T"
+df2$submitter_id[df2$submitter_id=="X11LU035-NA_T"] <- "X11LU035_T"
+
+df <- inner_join(df2[,c("sample_id","submitter_id")],df,by=c("submitter_id"="Tumor_Sample_Barcode"))
+
+df <- df[order(df$Subtype),]
+
+expression <- CPTAC.LUAD[,df$sample_id] 
+colnames(expression) <- df$submitter_id
+
+SDs <- apply(expression,1,sd)
+GOI <- names(sort(SDs, decreasing = TRUE)[1:5000]) # top 5,000 most variable genes 
+expression <- expression[GOI,]
+
+# sort samples for visualization 
+
+df <- df[
+  with(df, order(Subtype, NMF.consensus, mRNA.Expression.Subtype.TCGA)),
+]
+
+df$Subtype <- as.character(df$Subtype)
+df$Subtype[is.na(df$Subtype)] <- "Unassigned"
+df$Subtype <- factor(df$Subtype, levels=c("G1","G3","G4","G5","Unassigned"))
+
+expression <- expression[,df$submitter_id]
+
+expression.scaled <- t(scale(t(expression)))
+
+library(ComplexHeatmap)
+library(pals)
+
+col = list(BayesNMF.subtypes = c("S1" = kelly()[2], 
+                     "S2" = kelly()[3],
+                     "S3" = kelly()[4],
+                     "S4" = kelly()[5],
+                     "S5" = kelly()[6],
+                     "Unassigned" = "grey"
+                     ),
+           CPTAC.multiomics.clusters  = c("C1" = "mediumturquoise", 
+                                          "C2" = "khaki1",
+                                          "C3" = "plum",
+                                          "C4" = "tomato"
+                                         ),
+           TCGA.expression.subtypes = c("Proximal-proliferative" = "firebrick",
+                                        "Proximal-inflammatory" = "green",
+                                        "Terminal Respiratory Unit" = "black")
+           
+           )
+
+s <- as.character(df$Subtype)
+s[s=="G1"] <- "S1"
+s[s=="G2"] <- "S2"
+s[s=="G3"] <- "S3"
+s[s=="G4"] <- "S4"
+s[s=="G5"] <- "S5"
+
+ha <- HeatmapAnnotation(BayesNMF.subtypes = s,
+                        CPTAC.multiomics.clusters = df$NMF.consensus,
+                       TCGA.expression.subtypes = df$mRNA.Expression.Subtype.TCGA, col = col)
+
+set.seed(50)
+
+# row scaled data
+hm <- Heatmap(expression.scaled, 
+        name = "Row z-scores of mRNA expression", #title of legend
+        column_title = "Samples", row_title = "Genes",
+        row_names_gp = gpar(fontsize = 11), # Text size for row names
+        cluster_columns = FALSE,
+        cluster_rows = TRUE,
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        top_annotation = ha
+        )
+
+hm
+
+pdf(file="./figures/Fig.S6A_subtype.concordance.with.CPTAC.and.TCGA.pdf",width=12,height=6)
+
+hm
+
+dev.off()
+
+```
+
+###### MET/CD274 copy number across subtypes 
+
+```{r fig.height=8, fig.width=10, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+CPTAC.LUAD.tumor.anno$submitter_id_modified.v2 <- sapply(CPTAC.LUAD.tumor.anno$submitter_id_modified, function(x){
+  paste0(paste0(str_split(x,"\\.")[[1]],collapse="-"),"_TP")
+})
+
+# CPTAC LUAD copy number data
+gene.cn <- read.delim("./input_data/GISTIC_CPTAC/broad_len_cutoff_0.5/CPTAC_LUAD_all/all_data_by_genes.txt",sep="\t",header=T,check.names=F,as.is=T) 
+
+gene.cn <- gene.cn[,colnames(gene.cn)[!colnames(gene.cn) %in% c("Gene ID", "Cytoband")]]
+colnames(gene.cn)[colnames(gene.cn)=="Gene Symbol"] <- "Gene"
+
+samples.overlap <- intersect(CPTAC.LUAD.tumor.anno$submitter_id_modified.v2,colnames(gene.cn))
+gene.cn <- gene.cn[,c("Gene",samples.overlap)]
+
+mat <- gene.cn[,colnames(gene.cn)[colnames(gene.cn) != "Gene"]]
+rownames(mat) <- gene.cn$Gene
+mat <- t(mat)
+
+mat <- as.data.frame(mat)
+
+mat$Sample <- rownames(mat)
+
+anno <- subset(CPTAC.LUAD.tumor.anno,submitter_id_modified.v2 %in% samples.overlap)
+
+df <- data.frame(Sample = anno$submitter_id_modified.v2,Subtype=anno$Subtype)
+
+mat <- inner_join(df,mat,by="Sample")
+
+mat$Subtype <- factor(mat$Subtype, levels=c("S3","S4","S5","Unassigned"))
+
+my_comparisons <- list( c("S3","S4"),
+                        c("S3","S5"), 
+                        c("S3","Unassigned")
+                        )
+
+mat2 <- mat[,c("Sample","Subtype","MET")]
+
+stat.test <- mat2 %>%
+                  wilcox_test(MET ~ Subtype, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+stat.test$y.position <- stat.test$y.position - 3
+stat.test$y.position[stat.test$p.adj.signif %in% c("**","***","****")] <- c(1, 1.2, 1.4, 1.6)
+
+mat2$MET[mat2$MET>1.5] <- 1.5 # if y values are greater than 2, force them to be 2 for visual purpose
+mat2 <- mat2[complete.cases(mat2), ]
+
+p <- ggplot(mat2, aes(x = Subtype, y = MET))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[4],kelly()[5],kelly()[6],"gray88"))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="MET", x="Subtype", y="Log2(copy number)-1")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.001, size = 5)#+
+        #scale_y_continuous(limits = c(0,1.6))
+
+p
+
+pdf(file="./figures/Fig.4B_MET_copynumber_by_expression_subtypes_in_CPTAC.pdf",width=9.5,height=7)
+
+p
+
+dev.off()
+
+mat2 <- mat[,c("Sample","Subtype","CD274")]
+
+stat.test <- mat2 %>%
+                  wilcox_test(CD274 ~ Subtype, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+stat.test$y.position <- stat.test$y.position - 6
+stat.test$y.position[stat.test$p.adj.signif=="***"] <- c(0.8, 1.1, 1.4)
+
+mat2$CD274[mat2$CD274>1.5] <- 1.5 # if y values are greater than 2, force them to be 2 for visual purpose
+mat2 <- mat2[complete.cases(mat2), ]
+
+p <- ggplot(mat2, aes(x = Subtype, y = CD274))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[4],kelly()[5],kelly()[6],"gray88"))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="CD274", x="Subtype", y="Log2(copy number)-1")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.0001, size = 5)
+
+p
+
+pdf(file="./figures/Fig.4A_CD274_copynumber_by_expression_subtypes_in_CPTAC.pdf",width=9.5,height=7)
+
+p
+
+dev.off()
+
+```
+
+###### MET/CD274 expression across subtypes
+
+```{r fig.height=8, fig.width=10, message=FALSE, warning=FALSE}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# (1) MET 
+
+goi <- "MET"
+mat <- CPTAC.LUAD[goi,CPTAC.LUAD.tumor.anno$sample_id]
+
+luad_exp <- data.frame(Sample = CPTAC.LUAD.tumor.anno$sample_id, Expression = as.numeric(mat))
+df <- data.frame(Sample = CPTAC.LUAD.tumor.anno$sample_id,Subtype=CPTAC.LUAD.tumor.anno$Subtype)
+luad_exp <- inner_join(luad_exp,df,by="Sample")
+luad_exp$Subtype <- as.character(luad_exp$Subtype)
+
+luad_exp <- subset(luad_exp, Subtype %in% c("S3","S4","S5","Unassigned"))
+
+luad_exp$Subtype <- factor(luad_exp$Subtype, levels=c("S3","S4","S5","Unassigned"))
+
+my_comparisons <- list( c("S3","S4"),
+                        c("S3","S5"), 
+                        c("S3","Unassigned")
+                        )
+
+stat.test <- luad_exp %>%
+                  wilcox_test(Expression ~ Subtype, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+p <- ggplot(luad_exp, aes(x = Subtype, y = Expression))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[4],kelly()[5],kelly()[6],"gray88"))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title=goi, x="Subtype", y="mRNA expression")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.04, size = 5)
+
+p
+
+pdf(file="./figures/Fig.4B_MET_expression_by_expression_subtypes_in_CPTAC.pdf",width=9.5,height=7)
+
+p
+
+dev.off()
+
+
+#####################################$
+
+# (2) CD274
+
+goi <- "CD274"
+mat <- CPTAC.LUAD[goi,CPTAC.LUAD.tumor.anno$sample_id]
+
+luad_exp <- data.frame(Sample = CPTAC.LUAD.tumor.anno$sample_id, Expression = as.numeric(mat))
+df <- data.frame(Sample = CPTAC.LUAD.tumor.anno$sample_id,Subtype=CPTAC.LUAD.tumor.anno$Subtype)
+luad_exp <- inner_join(luad_exp,df,by="Sample")
+luad_exp$Subtype <- as.character(luad_exp$Subtype)
+
+luad_exp <- subset(luad_exp, Subtype %in% c("S3","S4","S5","Unassigned"))
+
+luad_exp$Subtype <- factor(luad_exp$Subtype, levels=c("S3","S4","S5","Unassigned"))
+
+my_comparisons <- list( c("S3","S4"),
+                        c("S3","S5"), 
+                        c("S3","Unassigned")
+                        )
+stat.test <- luad_exp %>%
+                  wilcox_test(Expression ~ Subtype, comparisons = my_comparisons, paired = FALSE) %>% add_xy_position() %>% add_significance() 
+
+stat.test$p.adj <- sprintf("%.2e", stat.test$p.adj)
+
+p <- ggplot(luad_exp, aes(x = Subtype, y = Expression))+
+        geom_boxplot(aes(fill = Subtype), varwidth = T, alpha = 0.9, outlier.shape = NA)+
+        geom_jitter(alpha = 0.1)+
+        scale_fill_manual(values=c(kelly()[4],kelly()[5],kelly()[6],"gray88"))+
+        theme_bw(base_size = 30)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+        labs(title="CD274", x="Subtype", y="mRNA expression")+
+        stat_pvalue_manual(stat.test, label = "p.adj", hide.ns = TRUE, tip.length = 0.005, bracket.size = 0.8, step.increase = 0.04, size = 5)
+
+p
+
+pdf(file="./figures/Fig.4A_CD274_expression_by_expression_subtypes_in_CPTAC.pdf",width=9.5,height=7)
+
+p
+
+dev.off()
+
+```
+
+###### Copy number analysis (TCGA vs. CPTAC)
+
+```{r}
+
+# Important genes from TCGA 
+S3_amp_genes <- c("MCL1","PIK3CA","TERT","MET","KAT6A","CD274","JAK2","PAK1","KRAS","CDK4","MDM2",
+                  "TTF1", 
+                  "ERBB2",
+                  "CCNE1")
+S3_del_genes <- c("PTPRD","CDKN2A","CDKN2B","KDM6A")
+S4_amp_genes <- c("MYCL","MCL1","PIK3CA","CCND3","EGFR","MET","FGFR1","WHSC1L1",
+                  "CCND1","KRAS","CDK4","MDM2",
+                  "TTF1", 
+                  "ERBB2",
+                  "CCNE1","BCL2L1","MAPK1")
+S4_del_genes <- c("VGLL3","FAT1","CCSER1","PDE4D",
+                 "PTPRD","CDKN2A","CDKN2B","SMARCA4")
+S5_amp_genes <- c("MCL1","TERT","FGFR4",
+                  "KRAS","MDM2",
+                  "TTF1" 
+                  )
+S5_del_genes <- c("FAT1","PDE4D",
+                 "PTPRD","CDKN2A")
+
+S3.S4.S5_amp_genes <- unique(c(S3_amp_genes,S4_amp_genes,S5_amp_genes))
+S3.S4.S5_del_genes <- unique(c(S3_del_genes,S4_del_genes,S5_del_genes))
+
+################$
+# Subtype 3 Amp
+################$
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.3.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_3/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.3.cn[,colnames(TCGA.LUAD.subtype.3.cn)[! colnames(TCGA.LUAD.subtype.3.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.3.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.3.cn)
+
+mat <- mat[S3.S4.S5_amp_genes,]
+
+mat[mat == 2] <- 1
+mat[mat == -1] <- 0
+mat[mat == -2] <- 0
+
+mat.tcga.s3.amp <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CPTAC 
+
+CPTAC.LUAD.subtype.3.cn <- read.delim("./input_data/GISTIC_CPTAC/broad_len_cutoff_0.5/CPTAC_LUAD_subtype_3/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(CPTAC.LUAD.subtype.3.cn[,colnames(CPTAC.LUAD.subtype.3.cn)[! colnames(CPTAC.LUAD.subtype.3.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- CPTAC.LUAD.subtype.3.cn$Gene.Symbol
+remove(CPTAC.LUAD.subtype.3.cn)
+
+mat <- mat[S3.S4.S5_amp_genes,]
+
+mat[mat == 2] <- 1
+mat[mat == -1] <- 0
+mat[mat == -2] <- 0
+
+mat.s3.amp <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.cptac <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CPTAC-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene[df$Gene=="TTF1"] <- "NKX2-1"
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CPTAC-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CPTAC-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(S3.S4.S5_amp_genes)),rep(n.cptac,length(S3.S4.S5_amp_genes)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CPTAC-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df.S3.amp <- df
+
+################$
+# Subtype 3 Del
+################$
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.3.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_3/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.3.cn[,colnames(TCGA.LUAD.subtype.3.cn)[! colnames(TCGA.LUAD.subtype.3.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.3.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.3.cn)
+
+mat <- mat[S3.S4.S5_del_genes,]
+
+mat[mat == 1] <- 0
+mat[mat == 2] <- 0
+mat[mat == -1] <- 1
+mat[mat == -2] <- 1
+
+mat.tcga.s3.del <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CPTAC 
+
+CPTAC.LUAD.subtype.3.cn <- read.delim("./input_data/GISTIC_CPTAC/broad_len_cutoff_0.5/CPTAC_LUAD_subtype_3/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(CPTAC.LUAD.subtype.3.cn[,colnames(CPTAC.LUAD.subtype.3.cn)[! colnames(CPTAC.LUAD.subtype.3.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- CPTAC.LUAD.subtype.3.cn$Gene.Symbol
+remove(CPTAC.LUAD.subtype.3.cn)
+
+mat <- mat[S3.S4.S5_del_genes,]
+
+mat[mat == 1] <- 0
+mat[mat == 2] <- 0
+mat[mat == -1] <- 1
+mat[mat == -2] <- 1
+
+mat.s3.del <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.cptac <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CPTAC-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CPTAC-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CPTAC-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(S3.S4.S5_del_genes)),rep(n.cptac,length(S3.S4.S5_del_genes)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CPTAC-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df.S3.del <- df
+
+df <- rbind(df.S3.amp,df.S3.del)
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S3: SCNAs") +
+       xlab("Genes with recurrent SCNAs in TCGA LUAD") +
+       ylab("Percentage of samples \n with SCNAs \n among S3 tumors") +
+       scale_fill_manual(values=c("darkolivegreen3", "darkgreen")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.3B_pct.gene.SCNAs.in.S3.pdf",width=15,height=4)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+
+################$
+# Subtype 4 Amp
+################$
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.4.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_4/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.4.cn[,colnames(TCGA.LUAD.subtype.4.cn)[! colnames(TCGA.LUAD.subtype.4.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.4.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.4.cn)
+
+mat <- mat[S3.S4.S5_amp_genes,]
+
+mat[mat == 2] <- 1
+mat[mat == -1] <- 0
+mat[mat == -2] <- 0
+
+mat.tcga.s4.amp <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CPTAC 
+
+CPTAC.LUAD.subtype.4.cn <- read.delim("./input_data/GISTIC_CPTAC/broad_len_cutoff_0.5/CPTAC_LUAD_subtype_4/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(CPTAC.LUAD.subtype.4.cn[,colnames(CPTAC.LUAD.subtype.4.cn)[! colnames(CPTAC.LUAD.subtype.4.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- CPTAC.LUAD.subtype.4.cn$Gene.Symbol
+
+mat <- mat[S3.S4.S5_amp_genes,]
+
+mat[mat == 2] <- 1
+mat[mat == -1] <- 0
+mat[mat == -2] <- 0
+
+mat.s4.amp <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.cptac <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CPTAC-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene[df$Gene=="TTF1"] <- "NKX2-1"
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CPTAC-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CPTAC-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(S3.S4.S5_amp_genes)),rep(n.cptac,length(S3.S4.S5_amp_genes)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CPTAC-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df.S4.amp <- df
+
+################$
+# Subtype 4 Del
+################$
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.4.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_4/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.4.cn[,colnames(TCGA.LUAD.subtype.4.cn)[! colnames(TCGA.LUAD.subtype.4.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.4.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.4.cn)
+
+mat <- mat[S3.S4.S5_del_genes,]
+
+mat[mat == 1] <- 0
+mat[mat == 2] <- 0
+mat[mat == -1] <- 1
+mat[mat == -2] <- 1
+
+mat.tcga.s4.del <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CPTAC 
+
+CPTAC.LUAD.subtype.4.cn <- read.delim("./input_data/GISTIC_CPTAC/broad_len_cutoff_0.5/CPTAC_LUAD_subtype_4/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(CPTAC.LUAD.subtype.4.cn[,colnames(CPTAC.LUAD.subtype.4.cn)[! colnames(CPTAC.LUAD.subtype.4.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- CPTAC.LUAD.subtype.4.cn$Gene.Symbol
+remove(CPTAC.LUAD.subtype.4.cn)
+
+mat <- mat[S3.S4.S5_del_genes,]
+
+mat[mat == 1] <- 0
+mat[mat == 2] <- 0
+mat[mat == -1] <- 1
+mat[mat == -2] <- 1
+
+mat.s4.del <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.cptac <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CPTAC-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CPTAC-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CPTAC-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(S3.S4.S5_del_genes)),rep(n.cptac,length(S3.S4.S5_del_genes)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CPTAC-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df.S4.del <- df
+
+df <- rbind(df.S4.amp,df.S4.del)
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S4: SCNAs") +
+       xlab("Genes with recurrent SCNAs in TCGA LUAD") +
+       ylab("Percentage of samples \n with SCNAs \n among S4 tumors") +
+       scale_fill_manual(values=c("darkolivegreen3", "darkgreen")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.3B_pct.gene.SCNAs.in.S4.pdf",width=15,height=4)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+
+################$
+# Subtype 5 Amp
+################$
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.5.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_5/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.5.cn[,colnames(TCGA.LUAD.subtype.5.cn)[! colnames(TCGA.LUAD.subtype.5.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.5.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.5.cn)
+
+mat <- mat[S3.S4.S5_amp_genes,]
+
+mat[mat == 2] <- 1
+mat[mat == -1] <- 0
+mat[mat == -2] <- 0
+
+mat.tcga.s5.amp <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CPTAC 
+
+CPTAC.LUAD.subtype.5.cn <- read.delim("./input_data/GISTIC_CPTAC/broad_len_cutoff_0.5/CPTAC_LUAD_subtype_5/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(CPTAC.LUAD.subtype.5.cn[,colnames(CPTAC.LUAD.subtype.5.cn)[! colnames(CPTAC.LUAD.subtype.5.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- CPTAC.LUAD.subtype.5.cn$Gene.Symbol
+
+mat <- mat[S3.S4.S5_amp_genes,]
+
+mat <- mat[,colnames(mat)[colnames(mat)!="C3N.00545_TP"]] # excluded due to sample quality
+
+mat[mat == 2] <- 1
+mat[mat == -1] <- 0
+mat[mat == -2] <- 0
+
+mat.s5.amp <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.cptac <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CPTAC-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene[df$Gene=="TTF1"] <- "NKX2-1"
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CPTAC-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CPTAC-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(S3.S4.S5_amp_genes)),rep(n.cptac,length(S3.S4.S5_amp_genes)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CPTAC-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df.S5.amp <- df
+
+################$
+# Subtype 5 Del
+################$
+
+# (1) TCGA 
+
+TCGA.LUAD.subtype.5.cn <- read.delim("./input_data/GISTIC/broad_len_cutoff_0.5/LUAD_subtype_5/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(TCGA.LUAD.subtype.5.cn[,colnames(TCGA.LUAD.subtype.5.cn)[! colnames(TCGA.LUAD.subtype.5.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- TCGA.LUAD.subtype.5.cn$Gene.Symbol
+remove(TCGA.LUAD.subtype.5.cn)
+
+mat <- mat[S3.S4.S5_del_genes,]
+
+mat[mat == 1] <- 0
+mat[mat == 2] <- 0
+mat[mat == -1] <- 1
+mat[mat == -2] <- 1
+
+mat.tcga.s5.del <- mat
+
+res <- rowSums(mat) / ncol(mat) * 100
+
+n.tcga <- ncol(mat)
+
+# (2) CPTAC 
+
+CPTAC.LUAD.subtype.5.cn <- read.delim("./input_data/GISTIC_CPTAC/broad_len_cutoff_0.5/CPTAC_LUAD_subtype_5/all_thresholded.by_genes.txt", sep="\t", header=TRUE, as.is=TRUE)
+
+mat <- as.matrix(CPTAC.LUAD.subtype.5.cn[,colnames(CPTAC.LUAD.subtype.5.cn)[! colnames(CPTAC.LUAD.subtype.5.cn) %in% c("Gene.Symbol","Locus.ID","Cytoband") ]]) 
+rownames(mat) <- CPTAC.LUAD.subtype.5.cn$Gene.Symbol
+remove(CPTAC.LUAD.subtype.5.cn)
+
+mat <- mat[S3.S4.S5_del_genes,]
+
+mat <- mat[,colnames(mat)[colnames(mat)!="C3N.00545_TP"]] # excluded due to sample quality
+
+mat[mat == 1] <- 0
+mat[mat == 2] <- 0
+mat[mat == -1] <- 1
+mat[mat == -2] <- 1
+
+mat.s5.del <- mat
+
+res2 <- rowSums(mat) / ncol(mat) * 100
+
+n.cptac <- ncol(mat)
+
+# barplot 
+
+df <- data.frame(Group=c(rep("TCGA-LUAD",length(res)), rep("CPTAC-LUAD",length(res2))),
+                 Gene=c(names(res),names(res2)),
+                 Pct=c(res,res2)
+                 )
+df$Gene <- as.character(df$Gene)
+df$Gene <- factor(df$Gene, levels=unique(df$Gene))
+df$Group <- factor(df$Group, levels=c("TCGA-LUAD","CPTAC-LUAD"))
+
+df$Pct <- round(df$Pct,0)
+df_wide <- spread(df, Gene, Pct)
+df_wide <- df_wide[,colnames(df_wide)[colnames(df_wide)!="Group"]]
+rownames(df_wide) <- c("TCGA-LUAD","CPTAC-LUAD")
+
+df$Prop <- df$Pct / 100
+alpha <- 0.05 # Set CI alpha level (1-alpha/2)*100%
+z <- qnorm(1-alpha/2) # Calculate the critical z-score
+df$N <- c(rep(n.tcga,length(S3.S4.S5_del_genes)),rep(n.cptac,length(S3.S4.S5_del_genes)))
+df$SD <- z*sqrt(df$Prop*(1-df$Prop)/df$N)*100
+
+# Calculating the bayesian credible interval for proportions using the beta distribution as prior 
+library(binom)
+Lower <- c()
+Upper <- c()
+for(i in 1:nrow(df)){
+  
+  Lower <- c(Lower, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$lower*100)
+  Upper <- c(Upper, binom.bayes(x = df$N[i]*df$Prop[i], n = df$N[i], conf.level = 0.95)$upper*100)
+  
+}
+df$Lower <- Lower
+df$Upper <- Upper
+
+temp <- subset(df, Group=="CPTAC-LUAD")
+temp <- temp[order(-temp$Pct),]
+df$Gene <- factor(df$Gene, levels = temp$Gene)
+
+df.S5.del <- df
+
+df <- rbind(df.S5.amp,df.S5.del)
+
+theme_set(theme_bw())
+gg <- ggplot(df, aes(x=Gene, y=Pct, fill=Group)) + 
+       geom_bar(position="dodge",stat="identity") + ylim(-10,110) + 
+       geom_errorbar( aes(ymin=Lower, ymax=Upper), width=0.2, alpha=0.9, position = position_dodge(0.9)) +
+       ggtitle("S5: SCNAs") +
+       xlab("Genes with recurrent SCNAs in TCGA LUAD") +
+       ylab("Percentage of samples \n with SCNAs \n among S5 tumors") +
+       scale_fill_manual(values=c("darkolivegreen3", "darkgreen")) +
+       theme_bw(base_size = 20) + 
+       theme(axis.text.x = element_text(angle = 45, vjust=1,  hjust=1)) +
+       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+gg
+
+pdf(file="./figures/Fig.3B_pct.gene.SCNAs.in.S5.pdf",width=15,height=4)
+
+theme_set(theme_bw())
+gg
+
+dev.off()
+
+####################$
+# cosine similairty 
+####################$
+
+df.S3.amp$Subtype <- rep("S3",nrow(df.S3.amp))
+df.S3.amp$SCNA <- rep("Amp",nrow(df.S3.amp))
+df.S3.del$Subtype <- rep("S3",nrow(df.S3.del))
+df.S3.del$SCNA <- rep("Del",nrow(df.S3.del))
+df.S4.amp$Subtype <- rep("S4",nrow(df.S4.amp))
+df.S4.amp$SCNA <- rep("Amp",nrow(df.S4.amp))
+df.S4.del$Subtype <- rep("S4",nrow(df.S4.del))
+df.S4.del$SCNA <- rep("Del",nrow(df.S4.del))
+df.S5.amp$Subtype <- rep("S5",nrow(df.S5.amp))
+df.S5.amp$SCNA <- rep("Amp",nrow(df.S5.amp))
+df.S5.del$Subtype <- rep("S5",nrow(df.S5.del))
+df.S5.del$SCNA <- rep("Del",nrow(df.S5.del))
+
+df <- rbind(df.S3.amp,df.S3.del,
+            df.S4.amp,df.S4.del,
+            df.S5.amp,df.S5.del
+            )
+
+library(lsa)
+
+x <- c( cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S3")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S3")$Prop),
+        cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S3")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S4")$Prop),
+        cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S3")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S5")$Prop),
+        
+        cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S4")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S3")$Prop),
+        cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S4")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S4")$Prop),
+        cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S4")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S5")$Prop),
+        
+        cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S5")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S3")$Prop),
+        cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S5")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S4")$Prop),
+        cosine(subset(df,Group=="TCGA-LUAD" & Subtype=="S5")$Prop, subset(df,Group=="CPTAC-LUAD" & Subtype=="S5")$Prop) 
+)
+
+# defining row names and column names
+rown <- c("TCGA_S3", "TCGA_S4", "TCGA_S5")
+coln <- c("CPTAC_S3", "CPTAC_S4", "CPTAC_S5")
+  
+# creating matrix
+m <- matrix(x, nrow = 3, byrow = TRUE, 
+            dimnames = list(rown, coln))
+
+m %>% 
+  as.data.frame() %>%
+  rownames_to_column("TCGA") %>%
+  pivot_longer(-c(TCGA), names_to = "CPTAC", values_to = "cosine.similarity")
+
+g <- m %>% 
+      as.data.frame() %>%
+      rownames_to_column("TCGA") %>%
+      pivot_longer(-c(TCGA), names_to = "CPTAC", values_to = "cosine.similarity") %>%
+      ggplot(aes(x=CPTAC, y=TCGA, fill=cosine.similarity)) + 
+      geom_tile() +
+      scale_fill_continuous(low="white", high="dodgerblue3")
+      #+scale_fill_viridis_c()
+
+pdf(file="./figures/Fig.3B_pct.gene.SCNAs_cosine_similarity.pdf",width=7,height=5)
+
+g
+
+dev.off()
+        
+
+```

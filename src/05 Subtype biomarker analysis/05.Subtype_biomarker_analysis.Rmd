@@ -1,0 +1,470 @@
+---
+title: "Roh, Geffen, Cha et al. 06 Subtype biomarker analysis"
+output: html_notebook
+---
+
+###### Gene expression subtype markers
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+subtype.markers <- read_excel("./tables/Table.S5_Subtype_markers.xlsx",sheet = 1, col_names = TRUE)
+
+sample.subtype.info <- read_excel("./tables/Suppl.Tables/Table.S1_Sample_Subtype_membership_for_TCGA_LUAD.xlsx",sheet = 1, col_names = TRUE)
+
+# (1) Subtype 3
+
+df <- data.frame(t(TUMOR.GEXP.log2.mat[subtype.markers$Marker.genes[subtype.markers$Subtype=="S3"],]))
+df$subtypes <- ifelse( rownames(df) %in% subset(sample.subtype.info,Subtypes=="S3")$Samples, 1, 0)
+
+# Penalized Logistic Regression approach 
+    
+library(tidyverse)
+library(caret)
+library(glmnet)    
+library(ROCR)
+
+# Split the data into training (80%) and test set (20%)
+set.seed(123)
+training.samples <- df$subtypes %>% 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df[training.samples, ]
+test.data <- df[-training.samples, ]
+
+# Dummy code categorical predictor variables
+x <- model.matrix(subtypes~., train.data)[,-1]
+# Convert the outcome (class) to a numerical variable
+y <- train.data$subtypes
+
+set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial") # The best lambda for your data, can be defined as the lambda that minimize the cross-validation prediction error rate. This can be determined automatically using the function cv.glmnet()
+
+RES <- c()
+for(ld in seq(cv.lasso$lambda.min, 0.15, 0.01)){
+  
+  eval(parse(text=
+               paste0("model <- glmnet(x, y, alpha = 1, family = \"binomial\",
+                lambda = ",ld,")")))
+  
+  # Determining the best threshold
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  auc=double(10)
+  labels= test.data$subtypes
+  pred=predict(model, newx = x.test, type="response", s=0.01)
+  for(i in 1:10){
+    predictions=ifelse(pred>0.1*i,1,0)
+    predictions
+    predictions1=prediction(predictions,labels)
+    perf=performance(predictions1,"tpr","fpr")
+    auc.perf=performance(predictions1,measure="auc")
+    auc[i]=auc.perf@y.values
+  }
+  
+  thresholds= c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0)
+  auc=unlist(auc,recursive=TRUE,use.names =TRUE)
+  best=which.max(auc)
+  best.threshold=thresholds[best]
+ 
+  # Make predictions on the test data
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  probabilities <- model %>% predict(newx = x.test)
+  predicted.classes <- ifelse(probabilities > best.threshold, 1, 0)
+  # Model accuracy
+  observed.classes <- test.data$subtypes
+
+  res <- data.frame(Lambda=ld,
+                    Predictors=coef(model)@Dimnames[[1]][coef(model)@i+1],
+                    Coefficients=coef(model)@x,
+                    Accuracy=mean(predicted.classes == observed.classes))
+  
+  RES <- rbind(RES,res)
+}
+
+system('mkdir -p ./tables/Table.Subtype_Biomarkers')
+
+write.xlsx(RES,"./tables/Table.Subtype_Biomarkers/S3_biomarkers_gene_expression_varying_lambda.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+# (2) Subtype 4
+
+df <- data.frame(t(TUMOR.GEXP.log2.mat[subtype.markers$Marker.genes[subtype.markers$Subtype=="S4"],]))
+df$subtypes <- ifelse( rownames(df) %in% subset(sample.subtype.info,Subtypes=="S4")$Samples, 1, 0)
+
+library(tidyverse)
+library(caret)
+library(glmnet)    
+library(ROCR)
+
+# Split the data into training and test set
+set.seed(123)
+training.samples <- df$subtypes %>% 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df[training.samples, ]
+test.data <- df[-training.samples, ]
+
+# Dumy code categorical predictor variables
+x <- model.matrix(subtypes~., train.data)[,-1]
+# Convert the outcome (class) to a numerical variable
+y <- train.data$subtypes
+
+set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+
+RES <- c()
+for(ld in seq(cv.lasso$lambda.min, 0.3, 0.01)){
+  
+  eval(parse(text=
+               paste0("model <- glmnet(x, y, alpha = 1, family = \"binomial\",
+                lambda = ",ld,")")))
+  
+  # Determining the best threshold
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  auc=double(10)
+  labels= test.data$subtypes
+  pred=predict(model, newx = x.test, type="response", s=0.01)
+  for(i in 1:10){
+    predictions=ifelse(pred>0.1*i,1,0)
+    predictions
+    predictions1=prediction(predictions,labels)
+    perf=performance(predictions1,"tpr","fpr")
+    auc.perf=performance(predictions1,measure="auc")
+    auc[i]=auc.perf@y.values
+  }
+  
+  thresholds= c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0)
+  auc=unlist(auc,recursive=TRUE,use.names =TRUE)
+  best=which.max(auc)
+  best.threshold=thresholds[best]
+ 
+  # Make predictions on the test data
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  probabilities <- model %>% predict(newx = x.test)
+  predicted.classes <- ifelse(probabilities > best.threshold, 1, 0)
+  # Model accuracy
+  observed.classes <- test.data$subtypes
+
+  res <- data.frame(Lambda=ld,
+                    Predictors=coef(model)@Dimnames[[1]][coef(model)@i+1],
+                    Coefficients=coef(model)@x,
+                    Accuracy=mean(predicted.classes == observed.classes))
+  
+  RES <- rbind(RES,res)
+}
+
+write.xlsx(RES,"./tables/Table.Subtype_Biomarkers/S4_biomarkers_gene_expression_varying_lambda.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+# (3) Subtype 2
+
+df <- data.frame(t(TUMOR.GEXP.log2.mat[subtype.markers$Marker.genes[subtype.markers$Subtype=="S2"],]))
+df$subtypes <- ifelse( rownames(df) %in% subset(sample.subtype.info,Subtypes=="S2")$Samples, 1, 0)
+
+# Penalized Logistic Regression approach 
+    
+library(tidyverse)
+library(caret)
+library(glmnet)    
+library(ROCR)
+
+# Split the data into training (80%) and test set (20%)
+set.seed(123)
+training.samples <- df$subtypes %>% 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df[training.samples, ]
+test.data <- df[-training.samples, ]
+
+# Dumy code categorical predictor variables
+x <- model.matrix(subtypes~., train.data)[,-1]
+# Convert the outcome (class) to a numerical variable
+y <- train.data$subtypes
+
+set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial") # The best lambda for your data, can be defined as the lambda that minimize the cross-validation prediction error rate. This can be determined automatically using the function cv.glmnet()
+
+RES <- c()
+for(ld in seq(cv.lasso$lambda.min, 0.15, 0.01)){
+  
+  eval(parse(text=
+               paste0("model <- glmnet(x, y, alpha = 1, family = \"binomial\",
+                lambda = ",ld,")")))
+  
+  # Determining the best threshold
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  auc=double(10)
+  labels= test.data$subtypes
+  pred=predict(model, newx = x.test, type="response", s=0.01)
+  for(i in 1:10){
+    predictions=ifelse(pred>0.1*i,1,0)
+    predictions
+    predictions1=prediction(predictions,labels)
+    perf=performance(predictions1,"tpr","fpr")
+    auc.perf=performance(predictions1,measure="auc")
+    auc[i]=auc.perf@y.values
+  }
+  
+  thresholds= c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0)
+  auc=unlist(auc,recursive=TRUE,use.names =TRUE)
+  best=which.max(auc)
+  best.threshold=thresholds[best]
+ 
+  # Make predictions on the test data
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  probabilities <- model %>% predict(newx = x.test)
+  predicted.classes <- ifelse(probabilities > best.threshold, 1, 0)
+  # Model accuracy
+  observed.classes <- test.data$subtypes
+
+  res <- data.frame(Lambda=ld,
+                    Predictors=coef(model)@Dimnames[[1]][coef(model)@i+1],
+                    Coefficients=coef(model)@x,
+                    Accuracy=mean(predicted.classes == observed.classes))
+  
+  RES <- rbind(RES,res)
+}
+
+write.xlsx(RES,"./tables/Table.Subtype_Biomarkers/S2_biomarkers_gene_expression_varying_lambda.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+```
+
+###### Protein (RPPA) subtype markers
+
+```{r}
+
+# set a working directory
+setwd("/My_Working_Directory")
+
+# (1) Subtype 3
+
+RPPA <- read.delim("./input_data/TCGA_LUAD_RPPA/TCGA-LUAD-L4.csv", sep=",", header=TRUE, as.is=TRUE)
+
+RPPA$Sample_ID <- sapply(RPPA$Sample_ID, function(x){
+  paste0(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+rownames(RPPA) <- RPPA$Sample_ID
+RPPA <- RPPA[,colnames(RPPA)[!colnames(RPPA) %in% c("Sample_ID","Cancer_Type","Sample_Type","SetID")]]
+RPPA <- RPPA[intersect(rownames(RPPA),colnames(TUMOR.GEXP.log2.mat)),]
+RPPA <- na.omit(RPPA)
+RPPA$subtypes <- ifelse( rownames(RPPA) %in% subset(sample.subtype.info,Subtypes=="S3")$Samples, 1, 0)
+
+library(tidyverse)
+library(caret)
+library(glmnet)    
+library(ROCR)
+
+# Split the data into training and test set
+set.seed(123)
+training.samples <- RPPA$subtypes %>% 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- RPPA[training.samples, ]
+test.data <- RPPA[-training.samples, ]
+
+# Dumy code categorical predictor variables
+x <- model.matrix(subtypes~., train.data)[,-1]
+# Convert the outcome (class) to a numerical variable
+y <- train.data$subtypes
+
+set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+
+RES <- c()
+for(ld in seq(cv.lasso$lambda.min, 0.15, 0.01)){
+  
+  eval(parse(text=
+               paste0("model <- glmnet(x, y, alpha = 1, family = \"binomial\",
+                lambda = ",ld,")")))
+  
+  # Determining the best threshold
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  auc=double(10)
+  labels= test.data$subtypes
+  pred=predict(model, newx = x.test, type="response", s=0.01)
+  for(i in 1:10){
+    predictions=ifelse(pred>0.1*i,1,0)
+    predictions
+    predictions1=prediction(predictions,labels)
+    perf=performance(predictions1,"tpr","fpr")
+    auc.perf=performance(predictions1,measure="auc")
+    auc[i]=auc.perf@y.values
+  }
+  
+  thresholds= c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0)
+  auc=unlist(auc,recursive=TRUE,use.names =TRUE)
+  best=which.max(auc)
+  best.threshold=thresholds[best]
+ 
+  # Make predictions on the test data
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  probabilities <- model %>% predict(newx = x.test)
+  predicted.classes <- ifelse(probabilities > best.threshold, 1, 0)
+  # Model accuracy
+  observed.classes <- test.data$subtypes
+
+  res <- data.frame(Lambda=ld,
+                    Predictors=coef(model)@Dimnames[[1]][coef(model)@i+1],
+                    Coefficients=coef(model)@x,
+                    Accuracy=mean(predicted.classes == observed.classes))
+  
+  RES <- rbind(RES,res)
+}
+
+write.xlsx(RES,"./tables/Table.Subtype_Biomarkers/S3_biomarkers_rppa_varying_lambda.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+
+# (2) Subtype 4
+
+RPPA <- read.delim("./input_data/TCGA_LUAD_RPPA/TCGA-LUAD-L4.csv", sep=",", header=TRUE, as.is=TRUE)
+
+RPPA$Sample_ID <- sapply(RPPA$Sample_ID, function(x){
+  paste0(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+rownames(RPPA) <- RPPA$Sample_ID
+RPPA <- RPPA[,colnames(RPPA)[!colnames(RPPA) %in% c("Sample_ID","Cancer_Type","Sample_Type","SetID")]]
+RPPA <- RPPA[intersect(rownames(RPPA),colnames(TUMOR.GEXP.log2.mat)),]
+RPPA <- na.omit(RPPA)
+RPPA$subtypes <- ifelse( rownames(RPPA) %in% subset(sample.subtype.info,Subtypes=="S4")$Samples, 1, 0)
+
+library(tidyverse)
+library(caret)
+library(glmnet)    
+library(ROCR)
+
+# Split the data into training and test set
+set.seed(123)
+training.samples <- RPPA$subtypes %>% 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- RPPA[training.samples, ]
+test.data <- RPPA[-training.samples, ]
+
+# Dumy code categorical predictor variables
+x <- model.matrix(subtypes~., train.data)[,-1]
+# Convert the outcome (class) to a numerical variable
+y <- train.data$subtypes
+
+set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+
+RES <- c()
+for(ld in seq(cv.lasso$lambda.min, 0.2, 0.01)){
+  
+  eval(parse(text=
+               paste0("model <- glmnet(x, y, alpha = 1, family = \"binomial\",
+                lambda = ",ld,")")))
+  
+  # Determining the best threshold
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  auc=double(10)
+  labels= test.data$subtypes
+  pred=predict(model, newx = x.test, type="response", s=0.01)
+  for(i in 1:10){
+    predictions=ifelse(pred>0.1*i,1,0)
+    predictions
+    predictions1=prediction(predictions,labels)
+    perf=performance(predictions1,"tpr","fpr")
+    auc.perf=performance(predictions1,measure="auc")
+    auc[i]=auc.perf@y.values
+  }
+  
+  thresholds= c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0)
+  auc=unlist(auc,recursive=TRUE,use.names =TRUE)
+  best=which.max(auc)
+  best.threshold=thresholds[best]
+ 
+  # Make predictions on the test data
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  probabilities <- model %>% predict(newx = x.test)
+  predicted.classes <- ifelse(probabilities > best.threshold, 1, 0)
+  # Model accuracy
+  observed.classes <- test.data$subtypes
+
+  res <- data.frame(Lambda=ld,
+                    Predictors=coef(model)@Dimnames[[1]][coef(model)@i+1],
+                    Coefficients=coef(model)@x,
+                    Accuracy=mean(predicted.classes == observed.classes))
+  
+  RES <- rbind(RES,res)
+}
+
+write.xlsx(RES,"./tables/Table.Subtype_Biomarkers/S4_biomarkers_rppa_varying_lambda.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+# (3) Subtype 2
+
+RPPA <- read.delim("./input_data/TCGA_LUAD_RPPA/TCGA-LUAD-L4.csv", sep=",", header=TRUE, as.is=TRUE)
+
+RPPA$Sample_ID <- sapply(RPPA$Sample_ID, function(x){
+  paste0(str_split(x,"-")[[1]][1:3],collapse="-")
+})
+
+rownames(RPPA) <- RPPA$Sample_ID
+RPPA <- RPPA[,colnames(RPPA)[!colnames(RPPA) %in% c("Sample_ID","Cancer_Type","Sample_Type","SetID")]]
+RPPA <- RPPA[intersect(rownames(RPPA),colnames(TUMOR.GEXP.log2.mat)),]
+RPPA <- na.omit(RPPA)
+RPPA$subtypes <- ifelse( rownames(RPPA) %in% subset(sample.subtype.info,Subtypes=="S2")$Samples, 1, 0)
+
+library(tidyverse)
+library(caret)
+library(glmnet)    
+library(ROCR)
+
+# Split the data into training and test set
+set.seed(123)
+training.samples <- RPPA$subtypes %>% 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- RPPA[training.samples, ]
+test.data <- RPPA[-training.samples, ]
+
+# Dumy code categorical predictor variables
+x <- model.matrix(subtypes~., train.data)[,-1]
+# Convert the outcome (class) to a numerical variable
+y <- train.data$subtypes
+
+set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+
+RES <- c()
+#for(ld in seq(cv.lasso$lambda.min, 0.15, 0.01)){
+for(ld in seq(cv.lasso$lambda.min, 0.15, 0.005)){  
+  eval(parse(text=
+               paste0("model <- glmnet(x, y, alpha = 1, family = \"binomial\",
+                lambda = ",ld,")")))
+  
+  # Determining the best threshold
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  auc=double(10)
+  labels= test.data$subtypes
+  pred=predict(model, newx = x.test, type="response", s=0.01)
+  for(i in 1:10){
+    predictions=ifelse(pred>0.1*i,1,0)
+    predictions
+    predictions1=prediction(predictions,labels)
+    perf=performance(predictions1,"tpr","fpr")
+    auc.perf=performance(predictions1,measure="auc")
+    auc[i]=auc.perf@y.values
+  }
+  
+  thresholds= c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0)
+  auc=unlist(auc,recursive=TRUE,use.names =TRUE)
+  best=which.max(auc)
+  best.threshold=thresholds[best]
+ 
+  # Make predictions on the test data
+  x.test <- model.matrix(subtypes ~., test.data)[,-1]
+  probabilities <- model %>% predict(newx = x.test)
+  predicted.classes <- ifelse(probabilities > best.threshold, 1, 0)
+  # Model accuracy
+  observed.classes <- test.data$subtypes
+
+  res <- data.frame(Lambda=ld,
+                    Predictors=coef(model)@Dimnames[[1]][coef(model)@i+1],
+                    Coefficients=coef(model)@x,
+                    Accuracy=mean(predicted.classes == observed.classes))
+  
+  RES <- rbind(RES,res)
+}
+
+write.xlsx(RES,"./tables/Table.Subtype_Biomarkers/S2_biomarkers_rppa_varying_lambda.xlsx", sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+
+```
+
+
