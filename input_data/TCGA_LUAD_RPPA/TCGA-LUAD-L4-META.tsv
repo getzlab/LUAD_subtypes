@@ -1,0 +1,17 @@
+Dataset_ID	TCGA-LUAD-L4
+Source	TCGA
+Platform	MDA_RPPA_Core
+Sample_Type	patient tumor
+Included_In_Summary	yes
+Cancer_Type	Lung adenocarcinoma
+RPPA_Batch_ID	NA
+Species	Homo sapiens
+Num_Samples	362
+Num_Antibodies	237
+Normalization_Method	Replicates-based normalization (RBN)
+Normalization_Description	Using replicate samples that are common between batches, RBN adjusts the means and standard deviations of all the antibodies in the batches so that the means and standard deviations of the replicates become the same in all the batches.
+Dataset_Description	Lung adenocarcinoma (LUAD) replicates-based normalization data
+Comments	NA
+Reference	NA
+PMID	NA
+TCPA_Release	"4.2"
